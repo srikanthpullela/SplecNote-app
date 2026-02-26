@@ -15,6 +15,19 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn, execSync } = require('child_process');
+const chokidar = require('chokidar');
+const simpleGit = require('simple-git');
+
+// marked is ESM-only, loaded via dynamic import
+let markedFn = null;
+async function getMarked() {
+  if (!markedFn) {
+    const m = await import('marked');
+    markedFn = m.marked;
+    markedFn.setOptions({ breaks: true, gfm: true });
+  }
+  return markedFn;
+}
 
 // Set app name FIRST — fixes "Electron" in macOS menu bar
 app.setName('SplecNote');
@@ -25,7 +38,11 @@ app.setName('SplecNote');
 const SPLECNOTE_DIR = path.join(os.homedir(), 'SplecNote');
 const SESSION_FILE = path.join(SPLECNOTE_DIR, '.session.json');
 const RECENT_FILE = path.join(SPLECNOTE_DIR, '.recent.json');
+const SETTINGS_FILE = path.join(SPLECNOTE_DIR, 'settings.json');
 const AUTOSAVE_DIR = path.join(SPLECNOTE_DIR, 'AutoSave');
+
+// File watcher instances (per watched directory)
+const watchers = new Map();
 
 function ensureDirs() {
   for (const dir of [SPLECNOTE_DIR, AUTOSAVE_DIR]) {
@@ -273,6 +290,10 @@ function buildMenu() {
         { label: 'Toggle Minimap', click: () => sendToFocused('view:toggle-minimap') },
         { label: 'Toggle Word Wrap', accelerator: 'Alt+Z', click: () => sendToFocused('view:toggle-wordwrap') },
         { type: 'separator' },
+        { label: 'Zen Mode', accelerator: 'CmdOrCtrl+K Z', click: () => sendToFocused('view:zen-mode') },
+        { label: 'Split Editor', accelerator: 'CmdOrCtrl+\\', click: () => sendToFocused('view:split-editor') },
+        { label: 'Toggle Markdown Preview', accelerator: 'CmdOrCtrl+Shift+V', click: () => sendToFocused('view:markdown-preview') },
+        { type: 'separator' },
         { label: 'Change Theme…', click: () => sendToFocused('view:change-theme') },
         { type: 'separator' },
         { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: () => sendToFocused('view:zoom-in') },
@@ -476,8 +497,154 @@ ipcMain.handle('shell:open-terminal', async (_e, dp) => {
 });
 
 // ---------------------------------------------------------------------------
+// File Watcher (chokidar)
+// ---------------------------------------------------------------------------
+ipcMain.handle('watch:start', async (e, dirPath) => {
+  const winId = BrowserWindow.fromWebContents(e.sender)?.id;
+  const key = `${winId}:${dirPath}`;
+  if (watchers.has(key)) return true; // already watching
+  try {
+    const watcher = chokidar.watch(dirPath, {
+      ignored: /(^|[/\\])(\.|node_modules|\.git|dist|build|\.next|\.nuxt|coverage|\.cache|__pycache__)/,
+      persistent: true,
+      ignoreInitial: true,
+      depth: 10,
+      awaitWriteFinish: { stabilityThreshold: 300, pollInterval: 100 },
+    });
+    watcher.on('all', (event, changedPath) => {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('watch:change', { event, path: changedPath });
+      }
+    });
+    watchers.set(key, watcher);
+    return true;
+  } catch (err) {
+    console.error('watch:start error:', err);
+    return false;
+  }
+});
+
+ipcMain.handle('watch:stop', async (e, dirPath) => {
+  const winId = BrowserWindow.fromWebContents(e.sender)?.id;
+  const key = `${winId}:${dirPath}`;
+  const watcher = watchers.get(key);
+  if (watcher) {
+    await watcher.close();
+    watchers.delete(key);
+  }
+  return true;
+});
+
+// ---------------------------------------------------------------------------
+// Git Integration (simple-git)
+// ---------------------------------------------------------------------------
+ipcMain.handle('git:status', async (_e, dirPath) => {
+  try {
+    const git = simpleGit(dirPath);
+    const isRepo = await git.checkIsRepo();
+    if (!isRepo) return null;
+    const status = await git.status();
+    const branch = status.current;
+    const files = {};
+    for (const f of status.modified) files[f] = 'modified';
+    for (const f of status.not_added) files[f] = 'untracked';
+    for (const f of status.created) files[f] = 'added';
+    for (const f of status.deleted) files[f] = 'deleted';
+    for (const f of status.renamed) files[f.to] = 'modified';
+    return { branch, files, ahead: status.ahead, behind: status.behind };
+  } catch {
+    return null;
+  }
+});
+
+ipcMain.handle('git:log', async (_e, dirPath, count = 20) => {
+  try {
+    const git = simpleGit(dirPath);
+    const isRepo = await git.checkIsRepo();
+    if (!isRepo) return null;
+    const log = await git.log({ maxCount: count });
+    return log.all.map(c => ({ hash: c.hash.slice(0, 7), message: c.message, author: c.author_name, date: c.date }));
+  } catch { return null; }
+});
+
+ipcMain.handle('git:diff', async (_e, dirPath, filePath) => {
+  try {
+    const git = simpleGit(dirPath);
+    const diff = await git.diff([filePath]);
+    return diff;
+  } catch { return null; }
+});
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+const DEFAULT_SETTINGS = {
+  fontSize: 14,
+  fontFamily: "'SF Mono', Menlo, Monaco, 'Courier New', monospace",
+  tabSize: 2,
+  wordWrap: 'off',
+  minimap: true,
+  autoSave: true,
+  autoSaveDelay: 3000,
+  bracketPairColorization: true,
+  renderWhitespace: 'selection',
+  smoothScrolling: true,
+  cursorBlinking: 'smooth',
+  lineNumbers: 'on',
+  theme: 'dark',
+};
+
+ipcMain.handle('settings:read', async () => {
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
+      return { ...DEFAULT_SETTINGS, ...data };
+    }
+  } catch {}
+  return { ...DEFAULT_SETTINGS };
+});
+
+ipcMain.handle('settings:write', async (_e, settings) => {
+  try {
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf-8');
+    return true;
+  } catch { return false; }
+});
+
+// ---------------------------------------------------------------------------
+// Binary file reading (for image preview)
+// ---------------------------------------------------------------------------
+ipcMain.handle('fs:read-binary', async (_e, fp) => {
+  try {
+    const buf = fs.readFileSync(fp);
+    return buf.toString('base64');
+  } catch { return null; }
+});
+
+// ---------------------------------------------------------------------------
+// Markdown rendering (via marked library)
+// ---------------------------------------------------------------------------
+ipcMain.handle('markdown:render', async (_e, content) => {
+  try {
+    const marked = await getMarked();
+    return marked(content);
+  } catch (err) {
+    console.error('markdown:render error:', err);
+    return '<p>Error rendering markdown</p>';
+  }
+});
+
+// ---------------------------------------------------------------------------
 // App lifecycle
 // ---------------------------------------------------------------------------
 app.whenReady().then(() => { ensureDirs(); createWindow(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); }); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit', () => { BrowserWindow.getAllWindows().forEach(w => w.webContents.send('app:before-quit')); });
+app.on('before-quit', () => {
+  // Clean up file watchers
+  for (const [key, watcher] of watchers) {
+    watcher.close();
+    watchers.delete(key);
+  }
+  BrowserWindow.getAllWindows().forEach(w => w.webContents.send('app:before-quit'));
+});

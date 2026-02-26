@@ -24,6 +24,15 @@ const state = {
   welcomeVisible: true,
   treeSectionOpen: true,
   recentlyClosed: [],      // stack of { title, filePath, content } for Cmd+Shift+T
+  // New feature state
+  zenMode: false,
+  splitEditor: null,       // secondary Monaco editor instance
+  splitActive: false,
+  markdownPreviewVisible: false,
+  outlineSectionOpen: false,
+  gitStatus: null,         // { branch, files, ahead, behind }
+  imagePreviewActive: false,
+  settings: null,
 };
 
 /* ---- DOM cache ---- */
@@ -79,6 +88,24 @@ function cacheDom() {
   dom.statusIndent     = $('#status-indent');
   dom.statusTheme      = $('#status-theme');
   dom.statusAutosave   = $('#status-autosave');
+  // New feature DOM
+  dom.breadcrumbsBar   = $('#breadcrumbs-bar');
+  dom.breadcrumbs      = $('#breadcrumbs');
+  dom.imagePreview     = $('#image-preview');
+  dom.imagePreviewImg  = $('#image-preview-img');
+  dom.imagePreviewInfo = $('#image-preview-info');
+  dom.markdownPreview  = $('#markdown-preview');
+  dom.markdownContent  = $('#markdown-preview-content');
+  dom.outlineSection   = $('#outline-section');
+  dom.outlineSectionHeader = $('#outline-section-header');
+  dom.outlineToggleIcon = $('#outline-toggle-icon');
+  dom.outlineList      = $('#outline-list');
+  dom.toastContainer   = $('#toast-container');
+  dom.statusGit        = $('#status-git');
+  dom.editorRow        = $('#editor-row');
+  dom.editorSplitContainer = $('#editor-split-container');
+  dom.editorSecondary  = $('#editor-container-secondary');
+  dom.splitResizer     = $('#split-resizer');
 }
 
 /* ================================================================
@@ -488,6 +515,9 @@ function initMonaco() {
         automaticLayout: true,
         scrollBeyondLastLine: false,
         renderWhitespace: 'selection',
+        autoClosingBrackets: 'always',
+        autoClosingQuotes: 'always',
+        autoSurround: 'languageDefined',
         bracketPairColorization: { enabled: true },
         guides: { bracketPairs: true },
         smoothScrolling: true,
@@ -503,6 +533,11 @@ function initMonaco() {
       state.editor.onDidChangeModelContent(() => {
         markTabModified(state.activeTabId, true);
         scheduleAutoSave(state.activeTabId);
+        // Update markdown preview and outline on content change
+        debounce(updateMarkdownPreview, 500)();
+        debounce(updateOutline, 1000)();
+        // Schedule git refresh
+        scheduleGitRefresh();
       });
       resolve(monaco);
     });
@@ -543,6 +578,30 @@ function activateTab(id) {
   const prev = state.tabs.find((t) => t.id === state.activeTabId);
   if (prev && state.editor) prev.viewState = state.editor.saveViewState();
   state.activeTabId = id;
+
+  // Handle special tabs (settings, image)
+  hideSettingsUI();
+  hideImagePreview();
+
+  if (tab._isSettings) {
+    state.editor.setModel(tab.model);
+    renderSettingsUI();
+    renderTabs();
+    updateTitleBar(tab);
+    updateEmptyTabShortcuts();
+    return;
+  }
+
+  // Handle image files
+  if (tab.filePath && isImageFile(tab.title)) {
+    showImagePreview(tab.filePath);
+    state.editor.setModel(null);
+    renderTabs();
+    updateTitleBar(tab);
+    updateEmptyTabShortcuts();
+    return;
+  }
+
   state.editor.setModel(tab.model);
   if (tab.viewState) state.editor.restoreViewState(tab.viewState);
   state.editor.focus();
@@ -551,17 +610,29 @@ function activateTab(id) {
   updateTitleBar(tab);
   clearSearchDecorations();
   updateEmptyTabShortcuts();
+  updateBreadcrumbs();
+  updateOutline();
+  updateMarkdownPreview();
+
+  // Sync split editor model
+  if (state.splitActive && state.splitEditor && tab.model) {
+    state.splitEditor.setModel(tab.model);
+  }
 }
 
 function closeTab(id) {
   const idx = state.tabs.findIndex((t) => t.id === id);
   if (idx === -1) return;
   const tab = state.tabs[idx];
-  // Save to recently closed stack
-  const closedEntry = { title: tab.title, filePath: tab.filePath, content: tab.model.getValue() };
-  state.recentlyClosed.push(closedEntry);
-  if (state.recentlyClosed.length > 20) state.recentlyClosed.shift();
-  // Clean up model
+  // Save to recently closed stack (skip settings tab)
+  if (!tab._isSettings) {
+    const closedEntry = { title: tab.title, filePath: tab.filePath, content: tab.model.getValue() };
+    state.recentlyClosed.push(closedEntry);
+    if (state.recentlyClosed.length > 20) state.recentlyClosed.shift();
+  }
+  // Clean up
+  hideSettingsUI();
+  hideImagePreview();
   tab.model.dispose();
   state.tabs.splice(idx, 1);
   clearAutoSave(id);
@@ -608,6 +679,8 @@ function renderTabs() {
       e.stopPropagation();
       showTabContextMenu(e.clientX, e.clientY, tab.id);
     });
+    // Tab drag reorder
+    makeTabDraggable(el, tab);
     dom.tabsContainer.appendChild(el);
   }
 }
@@ -648,6 +721,14 @@ async function openFile(filePath, content) {
   const existing = state.tabs.find((t) => t.filePath === filePath);
   if (existing) { activateTab(existing.id); return; }
   const name = filePath.split('/').pop();
+
+  // For image files, create a placeholder tab (content will be shown via image preview)
+  if (isImageFile(name)) {
+    createTab(name, filePath, '', 'plaintext');
+    await window.splecnote.addRecent(filePath);
+    return;
+  }
+
   createTab(name, filePath, content);
   await window.splecnote.addRecent(filePath);
 }
@@ -771,7 +852,15 @@ async function openFolder(dirPath) {
     applySidebarState();
   }
   try {
+    // Stop watching previous folder
+    if (state.folderPath && state.folderPath !== dirPath) {
+      await stopWatching(state.folderPath);
+    }
     state.folderPath = dirPath;
+    // Start watching new folder
+    await startWatching(dirPath);
+    // Refresh git status
+    refreshGitStatus();
     // Add folder to recent list
     await window.splecnote.addRecent(dirPath);
     dom.fileTreeEmpty.classList.add('hidden');
@@ -843,6 +932,16 @@ async function renderTreeDir(dirPath, parentEl, depth) {
 
     item.appendChild(icon);
     item.appendChild(name);
+
+    // Git status badge
+    if (!entry.isDirectory) {
+      const badge = getGitBadge(entry.path);
+      if (badge) {
+        const badgeEl = document.createElement('span');
+        badgeEl.innerHTML = badge;
+        item.appendChild(badgeEl.firstChild);
+      }
+    }
 
     if (entry.isDirectory) {
       let expanded = false;
@@ -1387,6 +1486,11 @@ const COMMANDS = [
   { id: 'outdent',        label: 'Outdent Line',       shortcut: '⌘[',    action: () => state.editor?.getAction('editor.action.outdentLines')?.run() },
   { id: 'jump-bracket',   label: 'Jump to Bracket',    shortcut: '⇧⌘\\',  action: () => state.editor?.getAction('editor.action.jumpToBracket')?.run() },
   { id: 'cursor-undo',    label: 'Undo Cursor',        shortcut: '⌘U',    action: () => state.editor?.getAction('cursorUndo')?.run() },
+  { id: 'zen-mode',       label: 'Toggle Zen Mode',    shortcut: '⌘K Z',  action: toggleZenMode },
+  { id: 'split-editor',   label: 'Split Editor',       shortcut: '⌘\\',   action: toggleSplitEditor },
+  { id: 'md-preview',     label: 'Markdown Preview',   shortcut: '⇧⌘V',   action: toggleMarkdownPreview },
+  { id: 'settings',       label: 'Open Settings',      shortcut: '⌘,',    action: openSettingsTab },
+  { id: 'outline',        label: 'Toggle Outline',     shortcut: '',      action: toggleOutlineSection },
 ];
 
 function showCommandPalette() {
@@ -2302,6 +2406,29 @@ function initKeyboard() {
       if (state.editor) state.editor.getAction('editor.action.triggerParameterHints')?.run();
       return;
     }
+    // Cmd+\ → Split editor
+    if (cmd && !shift && !alt && e.key === '\\') {
+      e.preventDefault();
+      toggleSplitEditor();
+      return;
+    }
+    // Cmd+Shift+V → Markdown preview
+    if (cmd && shift && !alt && e.key === 'V') {
+      e.preventDefault();
+      toggleMarkdownPreview();
+      return;
+    }
+    // Cmd+, → Settings
+    if (cmd && !shift && !alt && e.key === ',') {
+      e.preventDefault();
+      openSettingsTab();
+      return;
+    }
+    // Escape in zen mode → exit zen mode
+    if (e.key === 'Escape' && state.zenMode) {
+      toggleZenMode();
+      return;
+    }
   });
 }
 
@@ -2339,7 +2466,11 @@ function initIpcHandlers() {
   api.on('view:toggle-minimap', () => toggleMinimap());
   api.on('view:zoom-in', () => changeFontSize(1));
   api.on('view:zoom-out', () => changeFontSize(-1));
+  api.on('view:zoom-reset', () => { if (state.editor) state.editor.updateOptions({ fontSize: 14 }); });
   api.on('view:change-theme', () => showThemePicker());
+  api.on('view:zen-mode', () => toggleZenMode());
+  api.on('view:split-editor', () => toggleSplitEditor());
+  api.on('view:markdown-preview', () => toggleMarkdownPreview());
 }
 
 /* ================================================================
@@ -2410,6 +2541,761 @@ function getFileIcon(name) {
   return icons[ext] || '📄';
 }
 
+function isImageFile(filename) {
+  const ext = filename.split('.').pop().toLowerCase();
+  return ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg', 'ico', 'tiff', 'tif'].includes(ext);
+}
+
+/* ================================================================
+   25. TOAST NOTIFICATIONS
+   ================================================================ */
+function showToast(message, type = 'info', duration = 4000) {
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  const icons = { info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌' };
+  toast.innerHTML = `
+    <span class="toast-icon">${icons[type] || icons.info}</span>
+    <span class="toast-msg">${escHtml(message)}</span>
+    <button class="toast-close" title="Dismiss">✕</button>
+  `;
+  toast.querySelector('.toast-close').addEventListener('click', () => dismissToast(toast));
+  dom.toastContainer.appendChild(toast);
+  if (duration > 0) {
+    setTimeout(() => dismissToast(toast), duration);
+  }
+  return toast;
+}
+
+function dismissToast(toast) {
+  toast.classList.add('toast-out');
+  setTimeout(() => toast.remove(), 250);
+}
+
+/* ================================================================
+   26. BREADCRUMBS
+   ================================================================ */
+function updateBreadcrumbs() {
+  const tab = state.tabs.find(t => t.id === state.activeTabId);
+  if (!tab || !tab.filePath || state.imagePreviewActive) {
+    dom.breadcrumbsBar.classList.add('hidden');
+    return;
+  }
+  dom.breadcrumbsBar.classList.remove('hidden');
+  dom.breadcrumbs.innerHTML = '';
+
+  let relPath = tab.filePath;
+  if (state.folderPath && relPath.startsWith(state.folderPath)) {
+    relPath = relPath.replace(state.folderPath + '/', '');
+  }
+  const parts = relPath.split('/');
+  for (let i = 0; i < parts.length; i++) {
+    if (i > 0) {
+      const sep = document.createElement('span');
+      sep.className = 'breadcrumb-sep';
+      sep.textContent = '›';
+      dom.breadcrumbs.appendChild(sep);
+    }
+    const crumb = document.createElement('span');
+    crumb.className = 'breadcrumb-item' + (i === parts.length - 1 ? ' active' : '');
+    crumb.textContent = parts[i];
+    // Click on breadcrumb folder to reveal in tree (future enhancement)
+    dom.breadcrumbs.appendChild(crumb);
+  }
+}
+
+/* ================================================================
+   27. IMAGE PREVIEW
+   ================================================================ */
+async function showImagePreview(filePath) {
+  state.imagePreviewActive = true;
+  dom.imagePreview.classList.remove('hidden');
+  dom.editorSplitContainer.style.display = 'none';
+  dom.breadcrumbsBar.classList.add('hidden');
+
+  const ext = filePath.split('.').pop().toLowerCase();
+  if (ext === 'svg') {
+    // SVG can be loaded directly
+    const content = await window.splecnote.readFile(filePath);
+    dom.imagePreviewImg.src = 'data:image/svg+xml;base64,' + btoa(content);
+  } else {
+    const base64 = await window.splecnote.readBinary(filePath);
+    if (base64) {
+      const mime = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', bmp: 'image/bmp', webp: 'image/webp', ico: 'image/x-icon', tiff: 'image/tiff', tif: 'image/tiff' };
+      dom.imagePreviewImg.src = `data:${mime[ext] || 'image/png'};base64,${base64}`;
+    }
+  }
+
+  // Show file info
+  try {
+    const stat = await window.splecnote.stat(filePath);
+    const size = stat?.size || 0;
+    const sizeStr = size > 1024*1024 ? (size/1024/1024).toFixed(1) + ' MB' : size > 1024 ? (size/1024).toFixed(1) + ' KB' : size + ' B';
+    dom.imagePreviewInfo.textContent = `${filePath.split('/').pop()} — ${sizeStr}`;
+  } catch {
+    dom.imagePreviewInfo.textContent = filePath.split('/').pop();
+  }
+}
+
+function hideImagePreview() {
+  if (!state.imagePreviewActive) return;
+  state.imagePreviewActive = false;
+  dom.imagePreview.classList.add('hidden');
+  dom.editorSplitContainer.style.display = '';
+  updateBreadcrumbs();
+}
+
+/* ================================================================
+   28. MARKDOWN PREVIEW
+   ================================================================ */
+async function toggleMarkdownPreview() {
+  state.markdownPreviewVisible = !state.markdownPreviewVisible;
+  if (state.markdownPreviewVisible) {
+    dom.markdownPreview.classList.remove('hidden');
+    await updateMarkdownPreview();
+  } else {
+    dom.markdownPreview.classList.add('hidden');
+  }
+  // Trigger editor relayout since space changed
+  if (state.editor) state.editor.layout();
+  if (state.splitEditor) state.splitEditor.layout();
+}
+
+async function updateMarkdownPreview() {
+  if (!state.markdownPreviewVisible) return;
+  const tab = state.tabs.find(t => t.id === state.activeTabId);
+  if (!tab) return;
+  const lang = tab.model.getLanguageId?.() || '';
+  if (lang !== 'markdown') {
+    dom.markdownContent.innerHTML = '<div class="outline-empty">Open a Markdown file to see preview</div>';
+    return;
+  }
+  const content = tab.model.getValue();
+  try {
+    const html = await window.splecnote.renderMarkdown(content);
+    dom.markdownContent.innerHTML = html || '';
+  } catch {
+    dom.markdownContent.innerHTML = '<div class="outline-empty">Error rendering markdown</div>';
+  }
+}
+
+function initMarkdownPreview() {
+  $('#btn-close-md-preview')?.addEventListener('click', () => {
+    state.markdownPreviewVisible = false;
+    dom.markdownPreview.classList.add('hidden');
+  });
+}
+
+/* ================================================================
+   29. OUTLINE / SYMBOL VIEW
+   ================================================================ */
+function toggleOutlineSection() {
+  state.outlineSectionOpen = !state.outlineSectionOpen;
+  dom.outlineToggleIcon.textContent = state.outlineSectionOpen ? '▼' : '▶';
+  dom.outlineList.classList.toggle('collapsed', !state.outlineSectionOpen);
+  if (state.outlineSectionOpen) updateOutline();
+}
+
+async function updateOutline() {
+  if (!state.outlineSectionOpen) return;
+  const tab = state.tabs.find(t => t.id === state.activeTabId);
+  if (!tab || !tab.model) {
+    dom.outlineList.innerHTML = '<div class="outline-empty">No symbols</div>';
+    return;
+  }
+
+  // Use simple regex-based symbol extraction (Monaco's getDocumentSymbols requires LSP)
+  const content = tab.model.getValue();
+  const symbols = extractSymbols(content, tab.model.getLanguageId?.() || 'plaintext');
+
+  dom.outlineList.innerHTML = '';
+  if (symbols.length === 0) {
+    dom.outlineList.innerHTML = '<div class="outline-empty">No symbols found</div>';
+    return;
+  }
+
+  for (const sym of symbols) {
+    const item = document.createElement('div');
+    item.className = 'outline-item';
+    item.style.paddingLeft = `${12 + (sym.depth || 0) * 12}px`;
+    item.innerHTML = `
+      <span class="outline-icon">${sym.icon}</span>
+      <span class="outline-name">${escHtml(sym.name)}</span>
+      <span class="outline-detail">${sym.detail || ''}</span>
+    `;
+    item.addEventListener('click', () => {
+      if (state.editor && sym.line) {
+        state.editor.revealLineInCenter(sym.line);
+        state.editor.setPosition({ lineNumber: sym.line, column: 1 });
+        state.editor.focus();
+      }
+    });
+    dom.outlineList.appendChild(item);
+  }
+}
+
+function extractSymbols(content, lang) {
+  const symbols = [];
+  const lines = content.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineNum = i + 1;
+
+    // Functions
+    let m;
+    if ((m = line.match(/^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)/))) {
+      symbols.push({ name: m[1], icon: 'ƒ', detail: 'function', line: lineNum, depth: 0 });
+    }
+    // Arrow functions / const functions
+    else if ((m = line.match(/^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[a-zA-Z_]\w*)\s*=>/))) {
+      symbols.push({ name: m[1], icon: 'ƒ', detail: 'arrow fn', line: lineNum, depth: 0 });
+    }
+    // Classes
+    else if ((m = line.match(/^\s*(?:export\s+)?class\s+(\w+)/))) {
+      symbols.push({ name: m[1], icon: 'C', detail: 'class', line: lineNum, depth: 0 });
+    }
+    // Methods (inside class)
+    else if ((m = line.match(/^\s+(?:async\s+)?(\w+)\s*\([^)]*\)\s*\{/)) && !line.match(/^\s*(if|for|while|switch|catch)\s/)) {
+      symbols.push({ name: m[1], icon: 'm', detail: 'method', line: lineNum, depth: 1 });
+    }
+    // Python def/class
+    else if (lang === 'python') {
+      if ((m = line.match(/^(\s*)def\s+(\w+)/))) {
+        symbols.push({ name: m[2], icon: 'ƒ', detail: 'def', line: lineNum, depth: m[1].length > 0 ? 1 : 0 });
+      } else if ((m = line.match(/^class\s+(\w+)/))) {
+        symbols.push({ name: m[1], icon: 'C', detail: 'class', line: lineNum, depth: 0 });
+      }
+    }
+    // Markdown headings
+    else if (lang === 'markdown' && (m = line.match(/^(#{1,6})\s+(.+)/))) {
+      symbols.push({ name: m[2], icon: 'H', detail: `h${m[1].length}`, line: lineNum, depth: m[1].length - 1 });
+    }
+    // HTML/JSX tags (top-level components)
+    else if (['html', 'xml'].includes(lang) && (m = line.match(/^<(\w+)[\s>]/))) {
+      if (!['div', 'span', 'p', 'br', 'hr', 'a', 'li', 'ul', 'ol', 'img'].includes(m[1].toLowerCase())) {
+        symbols.push({ name: `<${m[1]}>`, icon: '◇', detail: 'element', line: lineNum, depth: 0 });
+      }
+    }
+    // CSS selectors
+    else if (lang === 'css' || lang === 'scss') {
+      if ((m = line.match(/^([.#]?[\w-]+(?:\s*[,>+~]\s*[.#]?[\w-]+)*)\s*\{/))) {
+        symbols.push({ name: m[1].trim(), icon: '◻', detail: 'rule', line: lineNum, depth: 0 });
+      }
+    }
+    // Interface / type (TypeScript)
+    else if (lang === 'typescript' && (m = line.match(/^\s*(?:export\s+)?(?:interface|type)\s+(\w+)/))) {
+      symbols.push({ name: m[1], icon: 'I', detail: m[0].includes('interface') ? 'interface' : 'type', line: lineNum, depth: 0 });
+    }
+  }
+  return symbols;
+}
+
+/* ================================================================
+   30. ZEN MODE
+   ================================================================ */
+function toggleZenMode() {
+  state.zenMode = !state.zenMode;
+  document.body.classList.toggle('zen-mode', state.zenMode);
+  if (state.zenMode) {
+    showToast('Zen Mode enabled. Press Escape to exit.', 'info', 3000);
+  }
+  // Re-layout editor
+  if (state.editor) state.editor.layout();
+  if (state.splitEditor) state.splitEditor.layout();
+}
+
+/* ================================================================
+   31. SPLIT EDITOR
+   ================================================================ */
+function toggleSplitEditor() {
+  if (state.splitActive) {
+    closeSplitEditor();
+  } else {
+    openSplitEditor();
+  }
+}
+
+function openSplitEditor() {
+  if (state.splitActive || !state.editor) return;
+  state.splitActive = true;
+  dom.splitResizer.classList.remove('hidden');
+  dom.editorSecondary.classList.remove('hidden');
+
+  const tab = state.tabs.find(t => t.id === state.activeTabId);
+  state.splitEditor = monaco.editor.create(dom.editorSecondary, {
+    value: '',
+    language: 'plaintext',
+    theme: monacoThemeId(state.theme),
+    fontSize: state.editor.getOption(monaco.editor.EditorOption.fontSize),
+    fontFamily: "'SF Mono', Menlo, Monaco, 'Courier New', monospace",
+    minimap: { enabled: false },
+    automaticLayout: true,
+    scrollBeyondLastLine: false,
+    readOnly: false,
+    autoClosingBrackets: 'always',
+    autoClosingQuotes: 'always',
+    bracketPairColorization: { enabled: true },
+    guides: { bracketPairs: true },
+  });
+
+  // Share the same model as the primary editor
+  if (tab && tab.model) {
+    state.splitEditor.setModel(tab.model);
+  }
+
+  initSplitResizer();
+  state.editor.layout();
+  state.splitEditor.layout();
+  showToast('Split editor opened', 'info', 2000);
+}
+
+function closeSplitEditor() {
+  if (!state.splitActive) return;
+  state.splitActive = false;
+  if (state.splitEditor) {
+    state.splitEditor.dispose();
+    state.splitEditor = null;
+  }
+  dom.splitResizer.classList.add('hidden');
+  dom.editorSecondary.classList.add('hidden');
+  dom.editorSecondary.innerHTML = '';
+  state.editor?.layout();
+}
+
+function initSplitResizer() {
+  let isResizing = false;
+  const resizer = dom.splitResizer;
+
+  resizer.addEventListener('mousedown', (e) => {
+    isResizing = true;
+    resizer.classList.add('active');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  const onMove = (e) => {
+    if (!isResizing) return;
+    const rect = dom.editorSplitContainer.getBoundingClientRect();
+    const pct = ((e.clientX - rect.left) / rect.width) * 100;
+    const clamped = Math.max(20, Math.min(80, pct));
+    dom.editorContainer.style.flex = `0 0 ${clamped}%`;
+    dom.editorSecondary.style.flex = `0 0 ${100 - clamped}%`;
+    state.editor?.layout();
+    state.splitEditor?.layout();
+  };
+
+  const onUp = () => {
+    if (isResizing) {
+      isResizing = false;
+      resizer.classList.remove('active');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    }
+  };
+
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+/* ================================================================
+   32. TAB DRAG REORDER
+   ================================================================ */
+function makeTabDraggable(el, tab) {
+  el.setAttribute('draggable', 'true');
+
+  el.addEventListener('dragstart', (e) => {
+    e.dataTransfer.setData('text/plain', tab.id.toString());
+    e.dataTransfer.effectAllowed = 'move';
+    el.classList.add('dragging');
+  });
+
+  el.addEventListener('dragend', () => {
+    el.classList.remove('dragging');
+    $$('.tab').forEach(t => { t.classList.remove('drag-over-left', 'drag-over-right'); });
+  });
+
+  el.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const rect = el.getBoundingClientRect();
+    const midX = rect.left + rect.width / 2;
+    el.classList.toggle('drag-over-left', e.clientX < midX);
+    el.classList.toggle('drag-over-right', e.clientX >= midX);
+  });
+
+  el.addEventListener('dragleave', () => {
+    el.classList.remove('drag-over-left', 'drag-over-right');
+  });
+
+  el.addEventListener('drop', (e) => {
+    e.preventDefault();
+    el.classList.remove('drag-over-left', 'drag-over-right');
+    const draggedId = parseInt(e.dataTransfer.getData('text/plain'));
+    const targetId = tab.id;
+    if (draggedId === targetId) return;
+
+    const fromIdx = state.tabs.findIndex(t => t.id === draggedId);
+    const toIdx = state.tabs.findIndex(t => t.id === targetId);
+    if (fromIdx === -1 || toIdx === -1) return;
+
+    const rect = el.getBoundingClientRect();
+    const midX = rect.left + rect.width / 2;
+    const insertBefore = e.clientX < midX;
+
+    // Remove from current position
+    const [moved] = state.tabs.splice(fromIdx, 1);
+    // Insert at new position
+    let newIdx = state.tabs.findIndex(t => t.id === targetId);
+    if (!insertBefore) newIdx++;
+    state.tabs.splice(newIdx, 0, moved);
+    renderTabs();
+  });
+}
+
+/* ================================================================
+   33. FILE WATCHER
+   ================================================================ */
+let fileWatchDebounce = null;
+
+function initFileWatcher() {
+  window.splecnote.on('watch:change', (data) => {
+    // Debounce tree refresh to avoid excessive updates
+    clearTimeout(fileWatchDebounce);
+    fileWatchDebounce = setTimeout(async () => {
+      if (state.folderPath) {
+        await refreshTree();
+        // Also check if any open file was modified externally
+        const tab = state.tabs.find(t => t.filePath === data.path);
+        if (tab && data.event === 'change') {
+          try {
+            const content = await window.splecnote.readFile(data.path);
+            if (content !== null && content !== tab.model.getValue()) {
+              // File changed externally — update if not modified by user
+              if (!tab.modified) {
+                tab.model.setValue(content);
+                showToast(`${tab.title} changed on disk`, 'info', 2000);
+              }
+            }
+          } catch {}
+        }
+      }
+    }, 500);
+  });
+}
+
+async function startWatching(dirPath) {
+  try {
+    await window.splecnote.watchFolder(dirPath);
+  } catch (err) {
+    console.error('startWatching error:', err);
+  }
+}
+
+async function stopWatching(dirPath) {
+  try {
+    await window.splecnote.unwatchFolder(dirPath);
+  } catch {}
+}
+
+/* ================================================================
+   34. GIT INTEGRATION
+   ================================================================ */
+let gitRefreshTimer = null;
+
+async function refreshGitStatus() {
+  if (!state.folderPath) {
+    state.gitStatus = null;
+    dom.statusGit.classList.add('hidden');
+    return;
+  }
+  try {
+    const status = await window.splecnote.gitStatus(state.folderPath);
+    state.gitStatus = status;
+    if (status) {
+      dom.statusGit.classList.remove('hidden');
+      let text = `⎇ ${status.branch || 'unknown'}`;
+      if (status.ahead > 0) text += ` ↑${status.ahead}`;
+      if (status.behind > 0) text += ` ↓${status.behind}`;
+      const changedCount = Object.keys(status.files).length;
+      if (changedCount > 0) text += ` · ${changedCount} changed`;
+      dom.statusGit.textContent = text;
+    } else {
+      dom.statusGit.classList.add('hidden');
+    }
+  } catch {
+    dom.statusGit.classList.add('hidden');
+  }
+}
+
+function scheduleGitRefresh() {
+  clearTimeout(gitRefreshTimer);
+  gitRefreshTimer = setTimeout(refreshGitStatus, 2000);
+}
+
+function getGitBadge(filePath) {
+  if (!state.gitStatus || !state.gitStatus.files || !state.folderPath) return '';
+  const rel = filePath.replace(state.folderPath + '/', '');
+  const status = state.gitStatus.files[rel];
+  if (!status) return '';
+  const classes = {
+    modified: 'git-badge-modified',
+    added: 'git-badge-added',
+    deleted: 'git-badge-deleted',
+    untracked: 'git-badge-untracked',
+  };
+  const labels = { modified: 'M', added: 'A', deleted: 'D', untracked: 'U' };
+  return `<span class="git-badge ${classes[status] || ''}">${labels[status] || '?'}</span>`;
+}
+
+/* ================================================================
+   35. SETTINGS UI
+   ================================================================ */
+async function loadSettings() {
+  try {
+    state.settings = await window.splecnote.readSettings();
+  } catch {
+    state.settings = {};
+  }
+  return state.settings;
+}
+
+async function saveSettings(newSettings) {
+  state.settings = { ...state.settings, ...newSettings };
+  await window.splecnote.writeSettings(state.settings);
+}
+
+function openSettingsTab() {
+  // Create a special settings tab
+  const existing = state.tabs.find(t => t.title === '⚙ Settings');
+  if (existing) { activateTab(existing.id); return; }
+
+  const tab = createTab('⚙ Settings', null, '', 'plaintext');
+  // Mark settings tab specially
+  tab._isSettings = true;
+  renderSettingsUI();
+}
+
+function renderSettingsUI() {
+  const tab = state.tabs.find(t => t._isSettings && t.id === state.activeTabId);
+  if (!tab) return;
+
+  // Hide editor, show settings in its place
+  dom.editorContainer.style.display = 'none';
+  dom.imagePreview.classList.add('hidden');
+
+  // Create settings container (reuse or create)
+  let container = $('#settings-ui');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'settings-ui';
+    container.className = 'settings-container';
+    dom.editorSplitContainer.appendChild(container);
+  }
+  container.style.display = '';
+
+  const s = state.settings || {};
+  container.innerHTML = `
+    <h2>Settings</h2>
+    <div class="settings-group">
+      <div class="settings-group-title">Editor</div>
+      <div class="setting-row">
+        <div><div class="setting-label">Font Size</div><div class="setting-desc">Controls the font size in pixels</div></div>
+        <div class="setting-control"><input type="number" id="set-fontSize" value="${s.fontSize || 14}" min="8" max="40" /></div>
+      </div>
+      <div class="setting-row">
+        <div><div class="setting-label">Tab Size</div><div class="setting-desc">Number of spaces per tab</div></div>
+        <div class="setting-control"><input type="number" id="set-tabSize" value="${s.tabSize || 2}" min="1" max="8" /></div>
+      </div>
+      <div class="setting-row">
+        <div><div class="setting-label">Word Wrap</div><div class="setting-desc">Controls how lines should wrap</div></div>
+        <div class="setting-control">
+          <select id="set-wordWrap">
+            <option value="off" ${s.wordWrap === 'off' ? 'selected' : ''}>Off</option>
+            <option value="on" ${s.wordWrap === 'on' ? 'selected' : ''}>On</option>
+            <option value="wordWrapColumn" ${s.wordWrap === 'wordWrapColumn' ? 'selected' : ''}>Word Wrap Column</option>
+            <option value="bounded" ${s.wordWrap === 'bounded' ? 'selected' : ''}>Bounded</option>
+          </select>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div><div class="setting-label">Minimap</div><div class="setting-desc">Show minimap overview</div></div>
+        <div class="setting-control"><input type="checkbox" id="set-minimap" ${s.minimap !== false ? 'checked' : ''} /></div>
+      </div>
+      <div class="setting-row">
+        <div><div class="setting-label">Line Numbers</div><div class="setting-desc">Controls line number visibility</div></div>
+        <div class="setting-control">
+          <select id="set-lineNumbers">
+            <option value="on" ${s.lineNumbers === 'on' ? 'selected' : ''}>On</option>
+            <option value="off" ${s.lineNumbers === 'off' ? 'selected' : ''}>Off</option>
+            <option value="relative" ${s.lineNumbers === 'relative' ? 'selected' : ''}>Relative</option>
+          </select>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div><div class="setting-label">Bracket Pair Colorization</div><div class="setting-desc">Color matching brackets</div></div>
+        <div class="setting-control"><input type="checkbox" id="set-bracketColor" ${s.bracketPairColorization !== false ? 'checked' : ''} /></div>
+      </div>
+      <div class="setting-row">
+        <div><div class="setting-label">Smooth Scrolling</div><div class="setting-desc">Animate scrolling</div></div>
+        <div class="setting-control"><input type="checkbox" id="set-smoothScroll" ${s.smoothScrolling !== false ? 'checked' : ''} /></div>
+      </div>
+    </div>
+    <div class="settings-group">
+      <div class="settings-group-title">Files</div>
+      <div class="setting-row">
+        <div><div class="setting-label">Auto Save</div><div class="setting-desc">Automatically save files after editing</div></div>
+        <div class="setting-control"><input type="checkbox" id="set-autoSave" ${s.autoSave !== false ? 'checked' : ''} /></div>
+      </div>
+      <div class="setting-row">
+        <div><div class="setting-label">Auto Save Delay</div><div class="setting-desc">Delay in ms before auto saving</div></div>
+        <div class="setting-control"><input type="number" id="set-autoSaveDelay" value="${s.autoSaveDelay || 3000}" min="500" max="30000" step="500" /></div>
+      </div>
+    </div>
+    <div class="settings-group">
+      <div class="settings-group-title">Appearance</div>
+      <div class="setting-row">
+        <div><div class="setting-label">Theme</div><div class="setting-desc">Current color theme</div></div>
+        <div class="setting-control">
+          <select id="set-theme">
+            ${THEMES.map(t => `<option value="${t.id}" ${state.theme === t.id ? 'selected' : ''}>${t.label}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div><div class="setting-label">Cursor Blinking</div><div class="setting-desc">Controls cursor animation style</div></div>
+        <div class="setting-control">
+          <select id="set-cursorBlinking">
+            <option value="blink" ${s.cursorBlinking === 'blink' ? 'selected' : ''}>Blink</option>
+            <option value="smooth" ${s.cursorBlinking === 'smooth' ? 'selected' : ''}>Smooth</option>
+            <option value="phase" ${s.cursorBlinking === 'phase' ? 'selected' : ''}>Phase</option>
+            <option value="expand" ${s.cursorBlinking === 'expand' ? 'selected' : ''}>Expand</option>
+            <option value="solid" ${s.cursorBlinking === 'solid' ? 'selected' : ''}>Solid</option>
+          </select>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div><div class="setting-label">Render Whitespace</div><div class="setting-desc">How to render whitespace characters</div></div>
+        <div class="setting-control">
+          <select id="set-renderWhitespace">
+            <option value="none" ${s.renderWhitespace === 'none' ? 'selected' : ''}>None</option>
+            <option value="selection" ${s.renderWhitespace === 'selection' ? 'selected' : ''}>Selection</option>
+            <option value="boundary" ${s.renderWhitespace === 'boundary' ? 'selected' : ''}>Boundary</option>
+            <option value="all" ${s.renderWhitespace === 'all' ? 'selected' : ''}>All</option>
+          </select>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Wire up change handlers
+  const onChange = debounce(async () => {
+    const newSettings = {
+      fontSize: parseInt($('#set-fontSize').value) || 14,
+      tabSize: parseInt($('#set-tabSize').value) || 2,
+      wordWrap: $('#set-wordWrap').value,
+      minimap: $('#set-minimap').checked,
+      lineNumbers: $('#set-lineNumbers').value,
+      bracketPairColorization: $('#set-bracketColor').checked,
+      smoothScrolling: $('#set-smoothScroll').checked,
+      autoSave: $('#set-autoSave').checked,
+      autoSaveDelay: parseInt($('#set-autoSaveDelay').value) || 3000,
+      theme: $('#set-theme').value,
+      cursorBlinking: $('#set-cursorBlinking').value,
+      renderWhitespace: $('#set-renderWhitespace').value,
+    };
+
+    await saveSettings(newSettings);
+
+    // Apply settings to editor
+    if (state.editor) {
+      state.editor.updateOptions({
+        fontSize: newSettings.fontSize,
+        tabSize: newSettings.tabSize,
+        wordWrap: newSettings.wordWrap,
+        minimap: { enabled: newSettings.minimap },
+        lineNumbers: newSettings.lineNumbers,
+        bracketPairColorization: { enabled: newSettings.bracketPairColorization },
+        smoothScrolling: newSettings.smoothScrolling,
+        cursorBlinking: newSettings.cursorBlinking,
+        renderWhitespace: newSettings.renderWhitespace,
+      });
+    }
+
+    // Apply theme if changed
+    if (newSettings.theme !== state.theme) {
+      applyTheme(newSettings.theme);
+    }
+
+    showToast('Settings saved', 'success', 1500);
+  }, 500);
+
+  container.querySelectorAll('input, select').forEach(el => {
+    el.addEventListener('change', onChange);
+    el.addEventListener('input', onChange);
+  });
+}
+
+function hideSettingsUI() {
+  const container = $('#settings-ui');
+  if (container) container.style.display = 'none';
+  dom.editorContainer.style.display = '';
+}
+
+/* ================================================================
+   36. COLOR PICKER (Monaco built-in)
+   ================================================================ */
+function registerColorProvider() {
+  // Monaco has built-in color detection for CSS/SCSS/LESS
+  // Register a color provider for other languages that use hex colors
+  if (typeof monaco === 'undefined') return;
+  const colorLangs = ['javascript', 'typescript', 'json', 'html', 'python'];
+  for (const lang of colorLangs) {
+    monaco.languages.registerColorProvider(lang, {
+      provideDocumentColors(model) {
+        const colors = [];
+        const text = model.getValue();
+        const hexRegex = /#([0-9a-fA-F]{3,8})\b/g;
+        let match;
+        while ((match = hexRegex.exec(text))) {
+          const hex = match[1];
+          let r, g, b, a = 1;
+          if (hex.length === 3) {
+            r = parseInt(hex[0]+hex[0], 16) / 255;
+            g = parseInt(hex[1]+hex[1], 16) / 255;
+            b = parseInt(hex[2]+hex[2], 16) / 255;
+          } else if (hex.length === 6) {
+            r = parseInt(hex.slice(0,2), 16) / 255;
+            g = parseInt(hex.slice(2,4), 16) / 255;
+            b = parseInt(hex.slice(4,6), 16) / 255;
+          } else if (hex.length === 8) {
+            r = parseInt(hex.slice(0,2), 16) / 255;
+            g = parseInt(hex.slice(2,4), 16) / 255;
+            b = parseInt(hex.slice(4,6), 16) / 255;
+            a = parseInt(hex.slice(6,8), 16) / 255;
+          } else continue;
+
+          const pos = model.getPositionAt(match.index);
+          const endPos = model.getPositionAt(match.index + match[0].length);
+          colors.push({
+            color: { red: r, green: g, blue: b, alpha: a },
+            range: { startLineNumber: pos.lineNumber, startColumn: pos.column, endLineNumber: endPos.lineNumber, endColumn: endPos.column },
+          });
+        }
+        return colors;
+      },
+      provideColorPresentations(model, colorInfo) {
+        const { red, green, blue, alpha } = colorInfo.color;
+        const toHex = (v) => Math.round(v * 255).toString(16).padStart(2, '0');
+        const hex = alpha < 1
+          ? `#${toHex(red)}${toHex(green)}${toHex(blue)}${toHex(alpha)}`
+          : `#${toHex(red)}${toHex(green)}${toHex(blue)}`;
+        return [{ label: hex }];
+      },
+    });
+  }
+}
+
 /* ================================================================
    24. INIT
    ================================================================ */
@@ -2417,8 +3303,14 @@ async function init() {
   cacheDom();
   applyTheme(state.theme);
 
+  // Load settings
+  await loadSettings();
+
   // Init Monaco
   await initMonaco();
+
+  // Register color provider for non-CSS languages
+  registerColorProvider();
 
   // Init all subsystems
   initSearch();
@@ -2435,9 +3327,12 @@ async function init() {
   initIpcHandlers();
   initDragDrop();
   initWelcome();
+  initMarkdownPreview();
+  initFileWatcher();
 
   // Sidebar section toggles
   dom.recentSectionHeader.addEventListener('click', toggleRecentSection);
+  dom.outlineSectionHeader.addEventListener('click', toggleOutlineSection);
 
   // Right-click on root folder bar => context menu for root folder
   dom.rootFolderBar.addEventListener('contextmenu', (e) => {

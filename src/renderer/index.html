@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; script-src 'self' 'unsafe-inline';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: file:; script-src 'self' 'unsafe-inline';" />
   <title>SplecNote</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -58,6 +58,16 @@
         </div>
         <div id="recent-list" class="recent-list collapsed"></div>
       </div>
+
+      <!-- Outline / Symbol View section -->
+      <div id="outline-resizer" class="recent-resizer"></div>
+      <div class="sidebar-section sidebar-section-outline" id="outline-section">
+        <div class="sidebar-section-header clickable" id="outline-section-header">
+          <span class="section-arrow" id="outline-toggle-icon">▶</span>
+          <span>OUTLINE</span>
+        </div>
+        <div id="outline-list" class="outline-list collapsed"></div>
+      </div>
     </aside>
 
     <!-- Resize handle -->
@@ -71,6 +81,11 @@
         <button id="btn-new-tab" class="tab-btn-new" title="New Tab (⌘N)">
           <svg width="14" height="14" viewBox="0 0 14 14"><line x1="7" y1="2" x2="7" y2="12" stroke="currentColor" stroke-width="1.5"/><line x1="2" y1="7" x2="12" y2="7" stroke="currentColor" stroke-width="1.5"/></svg>
         </button>
+      </div>
+
+      <!-- Breadcrumbs bar -->
+      <div id="breadcrumbs-bar" class="breadcrumbs-bar hidden">
+        <div id="breadcrumbs" class="breadcrumbs"></div>
       </div>
 
       <!-- Search / Replace bar (in-file) -->
@@ -101,8 +116,34 @@
         </div>
       </div>
 
-      <!-- Monaco editor -->
-      <div id="editor-container"></div>
+      <!-- Editor + Markdown preview row -->
+      <div id="editor-row" class="editor-row">
+        <!-- Editor area with split support -->
+        <div id="editor-split-container" class="editor-split-container">
+          <!-- Monaco editor (primary) -->
+          <div id="editor-container"></div>
+          <!-- Split editor (secondary) -->
+          <div id="split-resizer" class="split-resizer hidden"></div>
+          <div id="editor-container-secondary" class="hidden"></div>
+        </div>
+
+        <!-- Image preview (shown instead of editor for image files) -->
+        <div id="image-preview" class="image-preview hidden">
+          <div class="image-preview-inner">
+            <img id="image-preview-img" src="" alt="Preview" />
+            <div id="image-preview-info" class="image-preview-info"></div>
+          </div>
+        </div>
+
+        <!-- Markdown preview (side-by-side pane) -->
+        <div id="markdown-preview" class="markdown-preview hidden">
+          <div class="md-preview-header">
+            <span>Preview</span>
+            <button id="btn-close-md-preview" class="search-btn search-close" title="Close Preview">✕</button>
+          </div>
+          <div id="markdown-preview-content" class="md-preview-content"></div>
+        </div>
+      </div>
 
       <!-- No editor open overlay -->
       <div id="empty-tab-shortcuts" class="empty-tab-shortcuts hidden">
@@ -140,6 +181,7 @@
 
       <!-- Status bar -->
       <div id="status-bar">
+        <span id="status-git" class="status-clickable status-git hidden" title="Git Branch">⎇ main</span>
         <span id="status-position">Ln 1, Col 1</span>
         <span id="status-encoding">UTF-8</span>
         <span id="status-language">Plain Text</span>
@@ -258,6 +300,9 @@
       </div>
     </div>
   </div>
+
+  <!-- Toast notifications container -->
+  <div id="toast-container" class="toast-container"></div>
 
   <script src="../../node_modules/monaco-editor/min/vs/loader.js"></script>
   <script src="app.js"></script>

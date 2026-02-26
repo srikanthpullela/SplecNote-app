@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('splecnote', {
   createDir: (dp) => ipcRenderer.invoke('fs:create-dir', dp),
   getAllFiles: (dp) => ipcRenderer.invoke('fs:get-all-files', dp),
   searchInFiles: (dp, query, opts) => ipcRenderer.invoke('fs:search-in-files', dp, query, opts),
+  readBinary: (fp) => ipcRenderer.invoke('fs:read-binary', fp),
 
   // Auto-save
   getAutoSavePath: (title) => ipcRenderer.invoke('autosave:get-path', title),
@@ -42,6 +43,22 @@ contextBridge.exposeInMainWorld('splecnote', {
   revealInFinder: (fp) => ipcRenderer.invoke('shell:show-item', fp),
   openInTerminal: (dp) => ipcRenderer.invoke('shell:open-terminal', dp),
 
+  // File watcher
+  watchFolder: (dp) => ipcRenderer.invoke('watch:start', dp),
+  unwatchFolder: (dp) => ipcRenderer.invoke('watch:stop', dp),
+
+  // Git
+  gitStatus: (dp) => ipcRenderer.invoke('git:status', dp),
+  gitLog: (dp, count) => ipcRenderer.invoke('git:log', dp, count),
+  gitDiff: (dp, fp) => ipcRenderer.invoke('git:diff', dp, fp),
+
+  // Settings
+  readSettings: () => ipcRenderer.invoke('settings:read'),
+  writeSettings: (s) => ipcRenderer.invoke('settings:write', s),
+
+  // Markdown rendering
+  renderMarkdown: (content) => ipcRenderer.invoke('markdown:render', content),
+
   // IPC listener
   on: (channel, callback) => {
     const valid = [
@@ -51,6 +68,7 @@ contextBridge.exposeInMainWorld('splecnote', {
       'edit:quick-open', 'edit:command-palette', 'edit:goto-symbol',
       'view:toggle-sidebar', 'view:toggle-minimap', 'view:toggle-wordwrap',
       'view:zoom-in', 'view:zoom-out', 'view:zoom-reset', 'view:change-theme',
+      'view:zen-mode', 'view:split-editor', 'view:markdown-preview',
       'selection:select-all', 'selection:expand', 'selection:duplicate-line',
       'selection:move-line-up', 'selection:move-line-down',
       'selection:cursor-above', 'selection:cursor-below',
@@ -58,6 +76,7 @@ contextBridge.exposeInMainWorld('splecnote', {
       'selection:indent', 'selection:outdent',
       'nav:back', 'nav:forward',
       'session:restore', 'app:before-quit', 'help:shortcuts',
+      'watch:change',
     ];
     if (valid.includes(channel)) {
       const listener = (_event, ...args) => callback(...args);
