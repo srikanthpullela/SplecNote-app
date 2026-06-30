@@ -21,11 +21,14 @@ import type { SplecApp } from "./main";
 
 const AUTOSAVE_DEBOUNCE_MS = 500;
 const RETENTION_DAYS = 14;
+/** Buffers larger than this (in characters ≈ bytes) are skipped by autosave. */
+const BACKUP_SIZE_CAP = 25 * 1024 * 1024;
 
 export class SessionManager {
   private timer: number | null = null;
   private inFlight: Promise<void> | null = null;
   private pendingAgain = false;
+  private warnedBackupSkip = new Set<string>();
 
   constructor(private app: SplecApp) {}
 
@@ -64,8 +67,23 @@ export class SessionManager {
     const buffers = this.app.store.list();
     // Mirror each buffer's content to its backup file (atomic in the backend).
     for (const buf of buffers) {
+      const text = this.app.docText(buf);
+      // Very large buffers are skipped to keep autosave responsive. Named files
+      // are already safe on disk; only huge unsaved scratch buffers lose their
+      // backup, and the user is warned once.
+      if (text.length > BACKUP_SIZE_CAP) {
+        if (!this.warnedBackupSkip.has(buf.id)) {
+          this.warnedBackupSkip.add(buf.id);
+          const mb = Math.round(BACKUP_SIZE_CAP / (1024 * 1024));
+          this.app.setMessage(
+            `"${buf.title}" is over ${mb} MB — skipping autosave backup for performance.`,
+          );
+        }
+        continue;
+      }
+      this.warnedBackupSkip.delete(buf.id);
       try {
-        buf.backup = await autosaveBackup(buf.id, this.app.docText(buf));
+        buf.backup = await autosaveBackup(buf.id, text);
       } catch {
         /* keep going; a single backup failure must not lose the rest */
       }

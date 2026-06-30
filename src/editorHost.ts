@@ -43,6 +43,17 @@ function tabSizeExtension(n: number): Extension {
   return [EditorState.tabSize.of(n), indentUnit.of(" ".repeat(n))];
 }
 
+/**
+ * Documents larger than this (in characters) switch to "large-file mode":
+ * syntax highlighting, the minimap, indent guides and other per-character
+ * decorations are disabled so the editor stays responsive.
+ */
+export const LARGE_FILE_THRESHOLD = 2_000_000;
+
+export function isLargeDoc(length: number): boolean {
+  return length > LARGE_FILE_THRESHOLD;
+}
+
 export interface CursorInfo {
   line: number;
   col: number;
@@ -141,6 +152,20 @@ export class EditorHost {
       }
     });
     const clamp = (n: number) => Math.max(0, Math.min(doc.length, n));
+    const large = doc.length > LARGE_FILE_THRESHOLD;
+    // Heavy, per-character decorations are dropped in large-file mode so a
+    // multi-megabyte document opens and scrolls without freezing.
+    const heavy: Extension[] = large
+      ? []
+      : [
+          highlightSpecialChars(),
+          foldGutter(),
+          bracketMatching(),
+          rectangularSelection(),
+          crosshairCursor(),
+          highlightActiveLine(),
+          highlightSelectionMatches(),
+        ];
     return EditorState.create({
       doc,
       selection: selection
@@ -151,25 +176,19 @@ export class EditorHost {
         this.langC.of(langExt),
         this.wrapC.of(this.wrap ? EditorView.lineWrapping : []),
         this.tabC.of(tabSizeExtension(this.tabSize)),
-        this.wsC.of(this.showWhitespace ? highlightWhitespace() : []),
-        this.guideC.of(this.indentGuides ? indentationMarkers() : []),
-        this.extraC.of(this.extra),
+        this.wsC.of(this.showWhitespace && !large ? highlightWhitespace() : []),
+        this.guideC.of(this.indentGuides && !large ? indentationMarkers() : []),
+        this.extraC.of(large ? [] : this.extra),
         initialBookmarks.of(bookmarkLines ?? []),
         lineNumbers(),
         highlightActiveLineGutter(),
-        highlightSpecialChars(),
         history(),
-        foldGutter(),
         bookmarks(),
         drawSelection(),
         dropCursor(),
         EditorState.allowMultipleSelections.of(true),
         indentOnInput(),
-        bracketMatching(),
-        rectangularSelection(),
-        crosshairCursor(),
-        highlightActiveLine(),
-        highlightSelectionMatches(),
+        ...heavy,
         search(),
         keymap.of([
           { key: "Mod-d", run: selectNextOccurrence, preventDefault: true },
@@ -189,15 +208,16 @@ export class EditorHost {
   /** Show a buffer's state, then sync shared compartments + restore scroll. */
   show(state: EditorState, langExt: Extension, scrollTop: number): void {
     this.view.setState(state);
+    const large = isLargeDoc(state.doc.length);
     this.view.dispatch({
       effects: [
         this.themeC.reconfigure(this.themeExt),
-        this.langC.reconfigure(langExt),
+        this.langC.reconfigure(large ? [] : langExt),
         this.wrapC.reconfigure(this.wrap ? EditorView.lineWrapping : []),
         this.tabC.reconfigure(tabSizeExtension(this.tabSize)),
-        this.wsC.reconfigure(this.showWhitespace ? highlightWhitespace() : []),
-        this.guideC.reconfigure(this.indentGuides ? indentationMarkers() : []),
-        this.extraC.reconfigure(this.extra),
+        this.wsC.reconfigure(this.showWhitespace && !large ? highlightWhitespace() : []),
+        this.guideC.reconfigure(this.indentGuides && !large ? indentationMarkers() : []),
+        this.extraC.reconfigure(large ? [] : this.extra),
       ],
     });
     requestAnimationFrame(() => {
@@ -205,7 +225,13 @@ export class EditorHost {
     });
   }
 
+  /** True when the active document is in large-file mode. */
+  get isLarge(): boolean {
+    return isLargeDoc(this.view.state.doc.length);
+  }
+
   setLanguageExtension(langExt: Extension): void {
+    if (this.isLarge) return; // syntax highlighting stays off for huge docs
     this.view.dispatch({ effects: this.langC.reconfigure(langExt) });
   }
 
@@ -217,7 +243,7 @@ export class EditorHost {
   /** Set an extra editor extension (e.g. the minimap) via a dedicated compartment. */
   setExtra(ext: Extension): void {
     this.extra = ext;
-    this.view.dispatch({ effects: this.extraC.reconfigure(ext) });
+    this.view.dispatch({ effects: this.extraC.reconfigure(this.isLarge ? [] : ext) });
   }
 
   setWrap(wrap: boolean): void {

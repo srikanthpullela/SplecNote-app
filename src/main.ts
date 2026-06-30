@@ -27,7 +27,7 @@ import {
 } from "lucide";
 import { redo, selectAll, undo } from "@codemirror/commands";
 import { selectNextOccurrence } from "@codemirror/search";
-import { EditorHost, countText } from "./editorHost";
+import { EditorHost, countText, isLargeDoc } from "./editorHost";
 import * as T from "./transforms";
 import { goToLine } from "./transforms";
 import {
@@ -288,7 +288,8 @@ export class SplecApp {
     if (!buf) return;
     this.store.setActive(id);
     if (!buf.state) buf.state = this.host.createState("", []);
-    const langExt = await loadLanguageExtension(buf.language);
+    const large = isLargeDoc(buf.state.doc.length);
+    const langExt = large ? [] : await loadLanguageExtension(buf.language);
     this.currentLangExt = langExt;
     this.host.show(buf.state, langExt, buf.scrollTop);
     this.afterShow();
@@ -307,7 +308,8 @@ export class SplecApp {
       return;
     }
     if (!buf.state) buf.state = this.host.createState("", []);
-    const langExt = await loadLanguageExtension(buf.language);
+    const large = isLargeDoc(buf.state.doc.length);
+    const langExt = large ? [] : await loadLanguageExtension(buf.language);
     this.currentLangExt = langExt;
     this.host.show(buf.state, langExt, buf.scrollTop);
     this.afterShow();
@@ -321,6 +323,9 @@ export class SplecApp {
     this.refreshAll();
     this.refreshOutline();
     this.find?.refresh();
+    if (this.host.isLarge) {
+      this.statusBar.setMessage("Large file — syntax & minimap off for performance");
+    }
   }
 
   /** Live EditorState for a buffer (the active one lives in the view). */
@@ -614,6 +619,13 @@ export class SplecApp {
     if (!list) return;
     list.replaceChildren();
     if (!buf) return;
+    if (this.host.isLarge) {
+      const empty = document.createElement("p");
+      empty.className = "outline-empty";
+      empty.textContent = "Outline disabled for large files.";
+      list.append(empty);
+      return;
+    }
     const items = computeOutline(this.host.view.state, buf.language);
     if (items.length === 0) {
       const empty = document.createElement("p");
