@@ -256,15 +256,36 @@ export class SessionManager {
       if (document.visibilityState === "hidden") void this.flush();
     });
 
-    // Intercept window close so nothing is lost on quit.
+    // Intercept window close so nothing is lost on quit. The flush must never
+    // be able to *block* the close — if a backend write hangs or throws, we
+    // still destroy the window so the app always closes. A short timeout caps
+    // how long we wait for the final save.
     void (async () => {
       try {
         const { getCurrentWindow } = await import("@tauri-apps/api/window");
         const win = getCurrentWindow();
+        let closing = false;
         await win.onCloseRequested(async (event) => {
+          if (closing) return;
+          closing = true;
           event.preventDefault();
-          await this.flush();
-          await win.destroy();
+          try {
+            await Promise.race([
+              this.flush(),
+              new Promise((resolve) => setTimeout(resolve, 2000)),
+            ]);
+          } catch {
+            /* never let a failed flush keep the window open */
+          } finally {
+            // Fully quit the app (not just hide the window) so closing the
+            // window closes Splec Note, with destroy as a hard fallback.
+            try {
+              const { exit } = await import("@tauri-apps/plugin-process");
+              await exit(0);
+            } catch {
+              await win.destroy();
+            }
+          }
         });
       } catch {
         /* not in a Tauri window */

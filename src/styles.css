@@ -306,6 +306,8 @@ body {
   color: var(--text-muted);
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
 
 .status-left,
@@ -313,6 +315,24 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.status-left {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.status-right {
+  flex: 0 0 auto;
+}
+
+#status-msg {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-brand {
@@ -1080,6 +1100,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
   font-size: 13px;
   font-weight: 500;
   color: var(--text-strong);
@@ -1912,6 +1934,8 @@ body.zen-mode .editor-wrap {
 
 /* Preferences buttons (shared). */
 .prefs-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
   height: 32px;
   padding: 0 14px;
   border: 1px solid var(--border-strong);
@@ -2186,4 +2210,65 @@ body.zen-mode .editor-wrap {
   font-size: 12px;
   color: var(--text-muted);
   margin-top: 4px;
+}
+
+/* ===========================================================================
+   Responsive chrome — only kicks in when the window gets narrow. At normal
+   sizes the full title bar + status bar layout is preserved; as width drops we
+   progressively collapse lower-priority items instead of letting them wrap to
+   a second line.
+   =========================================================================== */
+
+/* Keep the title bar single-row and let the toolbar/center shrink gracefully. */
+.titlebar {
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.titlebar-left {
+  overflow: hidden;
+}
+.toolbar {
+  overflow: hidden;
+}
+
+/* Medium-narrow: drop the centre breadcrumb + the status-bar brand and counts,
+   which are the most redundant items. */
+@media (max-width: 1024px) {
+  .titlebar-center {
+    display: none;
+  }
+  .status-brand,
+  .status-left .status-sep {
+    display: none;
+  }
+}
+
+/* Narrow: also drop the word/char counts and the plugin status text. */
+@media (max-width: 860px) {
+  #status-counts,
+  #plugin-status,
+  .status-right .status-sep:first-of-type {
+    display: none;
+  }
+  .titlebar {
+    padding: 0 10px;
+  }
+  .statusbar {
+    padding: 0 12px;
+    gap: 8px;
+  }
+}
+
+/* Very narrow: collapse the language picker label and the editor-action toolbar
+   gaps so the essential buttons + cursor position still fit. */
+@media (max-width: 680px) {
+  .lang-picker-label {
+    display: none;
+  }
+  .status-left {
+    display: none;
+  }
+  .toolbar {
+    gap: 0;
+  }
 }

@@ -477,14 +477,27 @@ export class SplecApp {
     if (wrapBtn) wrapBtn.classList.toggle("is-on", this.prefs.wordWrap);
     if (!buf) {
       this.statusBar.setEnabled(false);
-      if (pathEl) pathEl.textContent = "";
+      if (pathEl) {
+        pathEl.textContent = "";
+        pathEl.hidden = true;
+      }
       return;
     }
     this.statusBar.setEnabled(true);
     if (pathEl) {
-      pathEl.textContent = buf.path ?? buf.title;
-      pathEl.title = buf.path ?? buf.title;
-      pathEl.classList.toggle("is-unsaved", !buf.path);
+      // Only surface a real file path in the header. Untitled buffers are
+      // already named by their tab, so leave the breadcrumb empty rather than
+      // floating a redundant "Untitled" in the title bar.
+      if (buf.path) {
+        pathEl.textContent = buf.path;
+        pathEl.title = buf.path;
+        pathEl.classList.remove("is-unsaved");
+        pathEl.hidden = false;
+      } else {
+        pathEl.textContent = "";
+        pathEl.title = "";
+        pathEl.hidden = true;
+      }
     }
     const info = this.host.cursorInfo();
     const { words, chars } = countText(this.docText(buf));
