@@ -92,6 +92,16 @@
               <button class="menu-item" data-act="cloneToOther" role="menuitem">Clone to Other Pane</button>
               <button class="menu-item menu-item-check" data-act="toggleZen" role="menuitemcheckbox"><span class="menu-check">✓</span>Distraction-Free<span class="menu-key">⌃⌘F</span></button>
               <div class="menu-sep"></div>
+              <div class="menu-label">Macros</div>
+              <button class="menu-item" data-act="macroToggleRecord" role="menuitem"><span id="menu-macro-record-label">Start Recording</span><span class="menu-key">⇧⌘R</span></button>
+              <button class="menu-item" data-act="macroPlayLast" role="menuitem">Play Last Macro</button>
+              <button class="menu-item" data-act="macroManager" role="menuitem">Manage Macros…</button>
+              <div id="menu-macros" class="menu-recent"></div>
+              <div class="menu-sep"></div>
+              <div class="menu-label">Plugins</div>
+              <div id="menu-plugins" class="menu-recent"></div>
+              <button class="menu-item" data-act="pluginManager" role="menuitem">Manage Plugins…</button>
+              <div class="menu-sep"></div>
               <button class="menu-item" data-act="commandPalette" role="menuitem">Command Palette…<span class="menu-key">⇧⌘P</span></button>
               <button class="menu-item" data-act="newWindow" role="menuitem">New Window<span class="menu-key">⇧⌘N</span></button>
               <div class="menu-sep"></div>
@@ -126,6 +136,10 @@
               <div id="editor-2" class="editor"></div>
             </div>
           </div>
+          <aside id="plugin-dock" class="plugin-dock" hidden aria-label="Plugin panel">
+            <div id="plugin-dock-tabs" class="plugin-dock-tabs"></div>
+            <div id="plugin-dock-body" class="plugin-dock-body"></div>
+          </aside>
         </div>
         <div id="empty-state" class="empty-state" hidden></div>
 
@@ -198,6 +212,7 @@
           <button id="wrap-toggle" class="status-btn" type="button" title="Toggle word wrap">Wrap: Off</button>
           <span class="status-sep">·</span>
           <span id="status-counts" class="status-counts">0 words</span>
+          <span id="plugin-status" class="plugin-status"></span>
           <span class="status-sep">·</span>
           <label class="lang-picker">
             <span class="lang-picker-label">Lang</span>
@@ -310,6 +325,26 @@
           </section>
 
           <section class="prefs-group">
+            <h3 class="prefs-group-title">Macros &amp; Plugins</h3>
+            <div class="prefs-card">
+              <div class="prefs-row">
+                <span class="prefs-row-label">
+                  Macros
+                  <span class="prefs-row-help">Record a sequence of edits and commands, then play it back.</span>
+                </span>
+                <button id="pref-open-macros" class="prefs-btn" type="button">Manage macros…</button>
+              </div>
+              <div class="prefs-row">
+                <span class="prefs-row-label">
+                  Plugins
+                  <span class="prefs-row-help">Enable or disable installed plugins and see what they contribute.</span>
+                </span>
+                <button id="pref-open-plugins" class="prefs-btn" type="button">Manage plugins…</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="prefs-group">
             <h3 class="prefs-group-title">Session</h3>
             <div class="prefs-card">
               <div class="prefs-row">
@@ -402,6 +437,66 @@
             <button id="udl-cancel" class="prefs-btn" type="button">Cancel</button>
             <button id="udl-save" class="prefs-btn prefs-btn-primary" type="button">Save</button>
           </div>
+        </div>
+      </div>
+    </div>
+    <!-- Macros manager -->
+    <div id="macros-overlay" class="modal-overlay" hidden>
+      <div class="prefs macros-manager" role="dialog" aria-modal="true" aria-labelledby="macros-title">
+        <div class="prefs-head">
+          <h2 id="macros-title" class="prefs-title">Macros</h2>
+          <button id="macros-close" class="prefs-close" type="button" aria-label="Close">✕</button>
+        </div>
+        <div class="prefs-body">
+          <section class="prefs-group">
+            <div class="prefs-card">
+              <div class="prefs-row">
+                <span class="prefs-row-label">
+                  <span id="macros-rec-status" class="macros-rec-status">Not recording</span>
+                  <span class="prefs-row-help">Record edits and editor commands. Open / Save dialogs are skipped.</span>
+                </span>
+                <button id="macros-record" class="prefs-btn prefs-btn-primary" type="button">● Record</button>
+              </div>
+              <div class="prefs-row">
+                <span class="prefs-row-label">Save recording as</span>
+                <span class="macros-save-row">
+                  <input id="macros-name" class="prefs-input" type="text" placeholder="Macro name" />
+                  <button id="macros-save" class="prefs-btn" type="button">Save</button>
+                </span>
+              </div>
+              <div class="prefs-row">
+                <span class="prefs-row-label">Play last recording</span>
+                <span class="macros-save-row">
+                  <input id="macros-times" class="prefs-input prefs-num" type="number" min="1" max="999" value="1" />
+                  <button id="macros-play-last" class="prefs-btn" type="button">Play ×N</button>
+                  <button id="macros-play-eof" class="prefs-btn" type="button">To EOF</button>
+                </span>
+              </div>
+            </div>
+          </section>
+          <section class="prefs-group">
+            <h3 class="prefs-group-title">Saved macros</h3>
+            <div class="prefs-card">
+              <div id="macros-list" class="macros-list"></div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- Plugins manager -->
+    <div id="plugins-overlay" class="modal-overlay" hidden>
+      <div class="prefs plugins-manager" role="dialog" aria-modal="true" aria-labelledby="plugins-title">
+        <div class="prefs-head">
+          <h2 id="plugins-title" class="prefs-title">Plugins</h2>
+          <button id="plugins-close" class="prefs-close" type="button" aria-label="Close">✕</button>
+        </div>
+        <div class="prefs-body">
+          <section class="prefs-group">
+            <p class="plugins-intro">Plugins extend Splec Note through a minimal, sandboxed host API — no file or
+              network access. See <code>PLUGINS.md</code> for details.</p>
+            <div id="plugins-list" class="plugins-list"></div>
+          </section>
         </div>
       </div>
     </div>

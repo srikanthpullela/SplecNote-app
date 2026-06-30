@@ -81,6 +81,9 @@ import {
 import { computeOutline, type OutlineItem } from "./outline";
 import { CommandPalette, type PaletteCommand } from "./commandPalette";
 import { SplitView } from "./split";
+import { MacroEngine, type SavedMacro } from "./macros";
+import { PluginManager, PLUGIN_CMD_PREFIX, type AppBridge } from "./plugins/manager";
+import { builtinPlugins } from "./plugins/builtins";
 
 const THEME_META: Record<ThemeMode, { label: string; icon: typeof Sun }> = {
   light: { label: "Light", icon: Sun },
@@ -124,6 +127,9 @@ export class SplecApp {
 
   palette!: CommandPalette;
   split!: SplitView;
+  macros!: MacroEngine;
+  plugins!: PluginManager;
+  private docListeners = new Set<() => void>();
   private outlineVisible = false;
   private minimapOn = false;
   private zenOn = false;
@@ -138,6 +144,17 @@ export class SplecApp {
     await loadCustomThemes();
     await loadUdls();
 
+    // Macro engine is created before the host so the host's user-edit callback
+    // can route typed input/deletes into the recorder.
+    this.macros = new MacroEngine({
+      runCommand: (act) => this.runMenuAction(act),
+      getView: () => this.host.view,
+      focus: () => this.host.focus(),
+      notify: (m) => this.setMessage(m),
+    });
+    this.macros.onStateChange = () => this.syncMacroUI();
+    await this.macros.loadAll();
+
     this.host = new EditorHost(this.editorEl, {
       themeExt: resolveThemeExtension(this.prefs.editorTheme, resolved),
       wrap: this.prefs.wordWrap,
@@ -149,6 +166,7 @@ export class SplecApp {
         onDocChanged: () => this.handleDocChanged(),
         onSelectionChanged: () => this.refreshStatus(),
         onScroll: (top) => this.handleScroll(top),
+        onUserEdit: (edit) => this.macros.recordEdit(edit),
       },
     });
 
@@ -180,6 +198,16 @@ export class SplecApp {
     });
     this.palette = new CommandPalette(() => this.paletteCommands());
     this.wireOutline();
+
+    // Plugin system: bundled first-party plugins, sandboxed to the host API.
+    this.plugins = new PluginManager(builtinPlugins);
+    await this.plugins.init(this.makePluginBridge(), {
+      dock: document.querySelector<HTMLElement>("#plugin-dock")!,
+      tabs: document.querySelector<HTMLElement>("#plugin-dock-tabs")!,
+      body: document.querySelector<HTMLElement>("#plugin-dock-body")!,
+      status: document.querySelector<HTMLElement>("#plugin-status")!,
+    });
+    this.wireManagers();
 
     this.renderThemeButton(this.mode);
     this.renderToolbarIcons();
@@ -372,6 +400,13 @@ export class SplecApp {
     this.split.mirror(this.host.view.state.doc.toString());
     this.scheduleOutline();
     this.scheduleAutosave();
+    for (const cb of this.docListeners) {
+      try {
+        cb();
+      } catch {
+        /* ignore plugin listener errors */
+      }
+    }
   }
 
   private handleScroll(top: number): void {
@@ -668,13 +703,29 @@ export class SplecApp {
       ["splitOrientation", "Toggle Split Orientation"],
       ["cloneToOther", "Clone to Other Pane"],
       ["toggleZen", "Toggle Distraction-Free", "⌃⌘F"],
+      ["macroToggleRecord", this.macros.isRecording() ? "Stop Macro Recording" : "Record Macro", "⇧⌘R"],
+      ["macroPlayLast", "Play Last Macro"],
+      ["macroManager", "Manage Macros…"],
+      ["pluginManager", "Manage Plugins…"],
     ];
-    return items.map(([act, title, hint]) => ({
+    const base = items.map(([act, title, hint]) => ({
       id: act,
       title,
       hint,
       run: () => this.runMenuAction(act),
     }));
+    const macroCmds = this.macros.list().map((m) => ({
+      id: `macroplay:${m.id}`,
+      title: `Macro: ${m.name}`,
+      hint: m.shortcut ? `⇧⌘${m.shortcut}` : undefined,
+      run: () => this.runMenuAction(`macroplay:${m.id}`),
+    }));
+    const pluginCmds = this.plugins.commandEntries().map((e) => ({
+      id: e.act,
+      title: e.title,
+      run: () => this.runMenuAction(e.act),
+    }));
+    return [...base, ...macroCmds, ...pluginCmds];
   }
 
   // ---- Theme ---------------------------------------------------------------
@@ -869,7 +920,12 @@ export class SplecApp {
       const open = menu.hidden;
       menu.hidden = !open;
       toggle.setAttribute("aria-expanded", String(open));
-      if (open) this.renderMenuRecent();
+      if (open) {
+        this.renderMenuRecent();
+        this.renderMenuMacros();
+        this.renderMenuPlugins();
+        this.syncMacroUI();
+      }
     });
     document.addEventListener("click", () => closeMenu());
     menu.addEventListener("click", (e) => e.stopPropagation());
@@ -883,6 +939,13 @@ export class SplecApp {
   }
 
   private runMenuAction(act: string): void {
+    // Record the high-level command for macros, then run it with edit-capture
+    // suppressed so the command's own edits aren't double-recorded.
+    this.macros.recordCommand(act);
+    this.macros.duringCommand(() => this.dispatchAction(act));
+  }
+
+  private dispatchAction(act: string): void {
     const run = (fn: (v: import("@codemirror/view").EditorView) => boolean) => {
       fn(this.host.view);
       this.host.focus();
@@ -932,6 +995,18 @@ export class SplecApp {
       case "cloneToOther": this.split.cloneToOther(); break;
       case "toggleZen": this.toggleZen(); break;
       case "commandPalette": this.palette.open(); break;
+      // Macros
+      case "macroToggleRecord": this.toggleMacroRecording(); break;
+      case "macroPlayLast": this.macros.playLast(); break;
+      case "macroManager": this.openMacros(); break;
+      case "pluginManager": this.openPlugins(); break;
+      default:
+        if (act.startsWith(PLUGIN_CMD_PREFIX)) {
+          this.plugins.runCommand(act);
+        } else if (act.startsWith("macroplay:")) {
+          this.macros.playMacro(act.slice("macroplay:".length));
+        }
+        break;
     }
   }
 
@@ -957,6 +1032,320 @@ export class SplecApp {
         void this.fileOps.openPath(path);
       });
       wrap.append(item);
+    }
+  }
+
+  // ---- Phase 6: Macros & Plugins -------------------------------------------
+
+  private makePluginBridge(): AppBridge {
+    return {
+      getActiveText: () => this.host.view.state.doc.toString(),
+      setActiveText: (text) => this.setActiveDocText(text),
+      getSelection: () => {
+        const s = this.host.view.state.selection.main;
+        return { from: s.from, to: s.to, text: this.host.view.state.sliceDoc(s.from, s.to) };
+      },
+      replaceSelection: (text) => {
+        this.host.view.dispatch(this.host.view.state.replaceSelection(text));
+        this.host.focus();
+      },
+      notify: (msg) => this.setMessage(msg),
+      subscribeDocChanged: (cb) => {
+        this.docListeners.add(cb);
+        return () => this.docListeners.delete(cb);
+      },
+      onContributionsChanged: () => {
+        this.renderMenuPlugins();
+      },
+    };
+  }
+
+  /** Replace the whole active document, preserving a clamped caret. */
+  private setActiveDocText(text: string): void {
+    const view = this.host.view;
+    const current = view.state.doc.toString();
+    if (current === text) return;
+    const anchor = Math.min(view.state.selection.main.anchor, text.length);
+    view.dispatch({
+      changes: { from: 0, to: current.length, insert: text },
+      selection: { anchor, head: anchor },
+    });
+    this.host.focus();
+  }
+
+  private renderMenuMacros(): void {
+    const wrap = document.querySelector<HTMLElement>("#menu-macros");
+    if (!wrap) return;
+    wrap.replaceChildren();
+    for (const m of this.macros.list()) {
+      const item = document.createElement("button");
+      item.className = "menu-item menu-recent-item";
+      item.type = "button";
+      item.textContent = m.name;
+      if (m.shortcut) {
+        const key = document.createElement("span");
+        key.className = "menu-key";
+        key.textContent = `⇧⌘${m.shortcut}`;
+        item.append(key);
+      }
+      item.addEventListener("click", () => {
+        document.querySelector<HTMLElement>("#app-menu")!.hidden = true;
+        this.runMenuAction(`macroplay:${m.id}`);
+      });
+      wrap.append(item);
+    }
+  }
+
+  private renderMenuPlugins(): void {
+    const wrap = document.querySelector<HTMLElement>("#menu-plugins");
+    if (!wrap) return;
+    wrap.replaceChildren();
+    const cmds = this.plugins.commandEntries();
+    if (cmds.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "menu-empty";
+      empty.textContent = "No plugin commands";
+      wrap.append(empty);
+      return;
+    }
+    for (const c of cmds) {
+      const item = document.createElement("button");
+      item.className = "menu-item menu-recent-item";
+      item.type = "button";
+      item.textContent = c.title;
+      item.addEventListener("click", () => {
+        document.querySelector<HTMLElement>("#app-menu")!.hidden = true;
+        this.runMenuAction(c.act);
+      });
+      wrap.append(item);
+    }
+  }
+
+  private toggleMacroRecording(): void {
+    if (this.macros.isRecording()) {
+      this.macros.stopRecording();
+      this.setMessage(
+        this.macros.hasRecording()
+          ? "Macro recorded — play it or save it from Manage Macros."
+          : "Stopped recording (nothing captured).",
+      );
+    } else {
+      this.macros.startRecording();
+      this.setMessage("Recording macro… run edits/commands, then stop.");
+    }
+    this.syncMacroUI();
+  }
+
+  /** Reflect the recording state in the menu label + macros manager. */
+  private syncMacroUI(): void {
+    const recording = this.macros.isRecording();
+    const label = document.querySelector<HTMLElement>("#menu-macro-record-label");
+    if (label) label.textContent = recording ? "Stop Recording" : "Start Recording";
+    const status = document.querySelector<HTMLElement>("#macros-rec-status");
+    if (status) {
+      status.textContent = recording
+        ? "● Recording…"
+        : this.macros.hasRecording()
+          ? "Recording ready to play or save"
+          : "Not recording";
+      status.classList.toggle("is-recording", recording);
+    }
+    const recBtn = document.querySelector<HTMLButtonElement>("#macros-record");
+    if (recBtn) recBtn.textContent = recording ? "■ Stop" : "● Record";
+  }
+
+  private wireManagers(): void {
+    document.querySelector("#pref-open-macros")?.addEventListener("click", () => {
+      this.closePrefs();
+      this.openMacros();
+    });
+    document.querySelector("#pref-open-plugins")?.addEventListener("click", () => {
+      this.closePrefs();
+      this.openPlugins();
+    });
+    document.querySelector("#macros-close")?.addEventListener("click", () => this.closeMacros());
+    document.querySelector("#macros-overlay")?.addEventListener("click", (e) => {
+      if (e.target === e.currentTarget) this.closeMacros();
+    });
+    document.querySelector("#plugins-close")?.addEventListener("click", () => this.closePlugins());
+    document.querySelector("#plugins-overlay")?.addEventListener("click", (e) => {
+      if (e.target === e.currentTarget) this.closePlugins();
+    });
+
+    document.querySelector("#macros-record")?.addEventListener("click", () => {
+      this.toggleMacroRecording();
+    });
+    document.querySelector("#macros-save")?.addEventListener("click", () => void this.saveMacroFromForm());
+    document.querySelector("#macros-play-last")?.addEventListener("click", () => {
+      const n = Number(document.querySelector<HTMLInputElement>("#macros-times")?.value ?? 1);
+      this.macros.playLast(Number.isFinite(n) && n > 0 ? n : 1);
+    });
+    document.querySelector("#macros-play-eof")?.addEventListener("click", () => this.macros.playToEnd());
+  }
+
+  private openMacros(): void {
+    const overlay = document.querySelector<HTMLElement>("#macros-overlay");
+    if (!overlay) return;
+    this.syncMacroUI();
+    this.renderMacrosList();
+    overlay.hidden = false;
+    document.querySelector<HTMLInputElement>("#macros-name")?.focus();
+  }
+
+  private closeMacros(): void {
+    const overlay = document.querySelector<HTMLElement>("#macros-overlay");
+    if (overlay) overlay.hidden = true;
+    this.host.focus();
+  }
+
+  private async saveMacroFromForm(): Promise<void> {
+    const input = document.querySelector<HTMLInputElement>("#macros-name");
+    const name = input?.value.trim() ?? "";
+    if (!name) {
+      this.setMessage("Enter a name to save the macro.");
+      return;
+    }
+    const saved = await this.macros.saveCurrent(name);
+    if (!saved) {
+      this.setMessage("Nothing to save — record a macro first.");
+      return;
+    }
+    if (input) input.value = "";
+    this.renderMacrosList();
+    this.setMessage(`Saved macro “${saved.name}”.`);
+  }
+
+  private renderMacrosList(): void {
+    const wrap = document.querySelector<HTMLElement>("#macros-list");
+    if (!wrap) return;
+    wrap.replaceChildren();
+    const macros = this.macros.list();
+    if (macros.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "udl-empty";
+      empty.textContent = "No saved macros yet.";
+      wrap.append(empty);
+      return;
+    }
+    for (const m of macros) {
+      wrap.append(this.renderMacroRow(m));
+    }
+  }
+
+  private renderMacroRow(m: SavedMacro): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "macros-item";
+
+    const name = document.createElement("span");
+    name.className = "macros-item-name";
+    name.textContent = `${m.name} · ${m.steps.length} step${m.steps.length === 1 ? "" : "s"}`;
+
+    const play = document.createElement("button");
+    play.className = "prefs-btn";
+    play.type = "button";
+    play.textContent = "Play";
+    play.addEventListener("click", () => this.macros.playMacro(m.id));
+
+    const shortcut = document.createElement("select");
+    shortcut.className = "prefs-input macros-shortcut";
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "No shortcut";
+    shortcut.append(none);
+    for (let i = 1; i <= 9; i++) {
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = `⇧⌘${i}`;
+      shortcut.append(opt);
+    }
+    shortcut.value = m.shortcut;
+    shortcut.addEventListener("change", () => {
+      void this.macros.assignShortcut(m.id, shortcut.value).then(() => this.renderMacrosList());
+    });
+
+    const del = document.createElement("button");
+    del.className = "prefs-btn prefs-btn-danger";
+    del.type = "button";
+    del.textContent = "Delete";
+    del.addEventListener("click", () => {
+      void this.macros.remove(m.id).then(() => this.renderMacrosList());
+    });
+
+    row.append(name, shortcut, play, del);
+    return row;
+  }
+
+  private openPlugins(): void {
+    const overlay = document.querySelector<HTMLElement>("#plugins-overlay");
+    if (!overlay) return;
+    this.renderPluginsList();
+    overlay.hidden = false;
+  }
+
+  private closePlugins(): void {
+    const overlay = document.querySelector<HTMLElement>("#plugins-overlay");
+    if (overlay) overlay.hidden = true;
+    this.host.focus();
+  }
+
+  private renderPluginsList(): void {
+    const wrap = document.querySelector<HTMLElement>("#plugins-list");
+    if (!wrap) return;
+    wrap.replaceChildren();
+    for (const p of this.plugins.list()) {
+      const card = document.createElement("div");
+      card.className = "plugin-card";
+
+      const head = document.createElement("div");
+      head.className = "plugin-card-head";
+      const title = document.createElement("span");
+      title.className = "plugin-card-name";
+      title.textContent = p.name;
+      const toggle = document.createElement("label");
+      toggle.className = "switch";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = p.enabled;
+      checkbox.addEventListener("change", () => {
+        void this.plugins.setEnabled(p.id, checkbox.checked).then(() => this.renderPluginsList());
+      });
+      const track = document.createElement("span");
+      track.className = "switch-track";
+      toggle.append(checkbox, track);
+      head.append(title, toggle);
+
+      const desc = document.createElement("p");
+      desc.className = "plugin-card-desc";
+      desc.textContent = p.description;
+
+      card.append(head, desc);
+
+      if (p.enabled) {
+        const contrib: string[] = [];
+        if (p.contributions.commands.length)
+          contrib.push(`${p.contributions.commands.length} command(s)`);
+        if (p.contributions.panels.length)
+          contrib.push(`${p.contributions.panels.length} panel(s)`);
+        if (p.contributions.statusItems.length)
+          contrib.push(`${p.contributions.statusItems.length} status item(s)`);
+        if (contrib.length) {
+          const meta = document.createElement("p");
+          meta.className = "plugin-card-contrib";
+          meta.textContent = `Contributes: ${contrib.join(" · ")}`;
+          card.append(meta);
+        }
+        const names = [
+          ...p.contributions.commands.map((c) => c.title),
+          ...p.contributions.panels.map((pp) => `${pp.title} panel`),
+        ];
+        if (names.length) {
+          const list = document.createElement("div");
+          list.className = "plugin-card-cmds";
+          list.textContent = names.join(", ");
+          card.append(list);
+        }
+      }
+      wrap.append(card);
     }
   }
 
@@ -1216,6 +1605,16 @@ export class SplecApp {
       } else if (key === "p" && e.shiftKey) {
         e.preventDefault();
         this.palette.open();
+      } else if (key === "r" && e.shiftKey) {
+        e.preventDefault();
+        this.toggleMacroRecording();
+      } else if (e.shiftKey && /^Digit[1-9]$/.test(e.code)) {
+        const digit = e.code.slice(5);
+        const macro = this.macros.byShortcut(digit);
+        if (macro) {
+          e.preventDefault();
+          this.macros.playMacro(macro.id);
+        }
       } else if (key === "f" && e.ctrlKey && e.metaKey) {
         e.preventDefault();
         this.toggleZen();

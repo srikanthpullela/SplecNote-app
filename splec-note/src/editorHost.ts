@@ -49,10 +49,17 @@ export interface CursorInfo {
   selLen: number;
 }
 
+/** A user-driven edit, surfaced for macro recording. */
+export type UserEdit =
+  | { kind: "insert"; text: string }
+  | { kind: "delete"; dir: "back" | "forward"; n: number };
+
 export interface HostCallbacks {
   onDocChanged: () => void;
   onSelectionChanged: () => void;
   onScroll: (scrollTop: number) => void;
+  /** Fired for user-driven document edits (typing/deletes) so macros can record them. */
+  onUserEdit?: (edit: UserEdit) => void;
 }
 
 export class EditorHost {
@@ -107,6 +114,31 @@ export class EditorHost {
     const updateListener = EditorView.updateListener.of((u) => {
       if (u.docChanged) this.cb.onDocChanged();
       if (u.selectionSet) this.cb.onSelectionChanged();
+      if (u.docChanged && this.cb.onUserEdit) {
+        for (const tr of u.transactions) {
+          if (!tr.docChanged) continue;
+          if (
+            tr.isUserEvent("input") ||
+            tr.isUserEvent("input.type") ||
+            tr.isUserEvent("input.paste")
+          ) {
+            let inserted = "";
+            tr.changes.iterChanges((_fa, _ta, _fb, _tb, ins) => {
+              inserted += ins.toString();
+            });
+            if (inserted) this.cb.onUserEdit({ kind: "insert", text: inserted });
+          } else if (tr.isUserEvent("delete")) {
+            let removed = 0;
+            tr.changes.iterChanges((fa, ta) => {
+              removed += ta - fa;
+            });
+            if (removed > 0) {
+              const dir = tr.isUserEvent("delete.forward") ? "forward" : "back";
+              this.cb.onUserEdit({ kind: "delete", dir, n: removed });
+            }
+          }
+        }
+      }
     });
     const clamp = (n: number) => Math.max(0, Math.min(doc.length, n));
     return EditorState.create({
