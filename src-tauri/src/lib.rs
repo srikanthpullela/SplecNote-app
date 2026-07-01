@@ -87,6 +87,8 @@ pub fn run() {
             // open-documents Apple Event. Queue the paths (for cold launch,
             // before the webview is ready) and also emit them live (for when
             // the app is already running).
+            // NOTE: RunEvent::Opened only exists on macOS.
+            #[cfg(target_os = "macos")]
             if let RunEvent::Opened { urls } = event {
                 let paths = urls_to_paths(&urls);
                 if !paths.is_empty() {
@@ -96,5 +98,7 @@ pub fn run() {
                     let _ = app_handle.emit("splec-open-files", paths);
                 }
             }
+            #[cfg(not(target_os = "macos"))]
+            let _ = event;
         });
 }
