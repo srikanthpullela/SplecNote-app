@@ -642,6 +642,21 @@ body {
   white-space: nowrap;
 }
 
+.tab-rename {
+  min-width: 60px;
+  max-width: 220px;
+  padding: 1px 4px;
+  margin: -1px 0;
+  border: 1px solid var(--splec-accent);
+  border-radius: 5px;
+  background: var(--bg-elevated, #fff);
+  color: var(--text-strong);
+  font: inherit;
+  line-height: 1.2;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.18);
+}
+
 .tab-dot {
   flex: 0 0 auto;
   width: 8px;

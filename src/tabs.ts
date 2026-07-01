@@ -6,6 +6,7 @@ export interface TabHandlers {
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onReorder: (fromIndex: number, toIndex: number) => void;
+  onRename: (id: string, title: string) => void;
 }
 
 export function renderTabs(
@@ -32,6 +33,52 @@ export function renderTabs(
     const title = document.createElement("span");
     title.className = "tab-title";
     title.textContent = buf.title;
+
+    // Double-click the label to rename the tab inline. Handy for turning an
+    // "Untitled" scratch note into something meaningful without saving first.
+    const beginRename = () => {
+      if (tab.querySelector(".tab-rename")) return;
+      const input = document.createElement("input");
+      input.className = "tab-rename";
+      input.type = "text";
+      input.value = buf.title;
+      input.spellcheck = false;
+      input.draggable = false;
+      input.addEventListener("mousedown", (e) => e.stopPropagation());
+      input.addEventListener("click", (e) => e.stopPropagation());
+      input.addEventListener("dblclick", (e) => e.stopPropagation());
+
+      let done = false;
+      const commit = (save: boolean) => {
+        if (done) return;
+        done = true;
+        const next = input.value.trim();
+        input.replaceWith(title);
+        if (save && next && next !== buf.title) {
+          handlers.onRename(buf.id, next);
+        }
+      };
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit(true);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          commit(false);
+        }
+        e.stopPropagation();
+      });
+      input.addEventListener("blur", () => commit(true));
+
+      title.replaceWith(input);
+      input.focus();
+      input.select();
+    };
+    title.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      beginRename();
+    });
 
     const close = document.createElement("button");
     close.className = "tab-close";

@@ -470,6 +470,14 @@ export class SplecApp {
         this.refreshTabs();
         this.scheduleAutosave();
       },
+      onRename: (id, title) => {
+        const buf = this.store.get(id);
+        if (!buf) return;
+        buf.title = title;
+        this.refreshTabs();
+        this.refreshStatus();
+        this.scheduleAutosave();
+      },
     });
   }
 
