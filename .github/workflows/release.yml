@@ -93,8 +93,8 @@ jobs:
 
       - name: Rename artifacts for clarity
         run: |
-          cd dist/mac && for f in *.dmg; do mv "$f" "SplecNote-${{ github.ref_name }}-mac.dmg"; done
-          cd dist/windows && for f in *.exe; do mv "$f" "SplecNote-${{ github.ref_name }}-windows-setup.exe"; done
+          cd dist/mac && for f in *.dmg; do mv "$f" "SplecNote-mac.dmg"; done
+          cd dist/windows && for f in *.exe; do mv "$f" "SplecNote-windows-setup.exe"; done
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -109,8 +109,8 @@ jobs:
             ### Downloads
             | Platform | File |
             |----------|------|
-            | macOS (Universal) | `SplecNote-${{ github.ref_name }}-mac.dmg` |
-            | Windows | `SplecNote-${{ github.ref_name }}-windows-setup.exe` |
+            | macOS (Universal) | `SplecNote-mac.dmg` |
+            | Windows | `SplecNote-windows-setup.exe` |
 
             ### What's new
             See [README](https://github.com/srikanthpullela/SplecNote-app#readme) for full feature list.
