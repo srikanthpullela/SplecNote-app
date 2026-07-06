@@ -64,7 +64,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlFMEUyMjk0QkRDOEEzMjcKUldRbm84aTlsQ0lPbnFlQUt1b21CdzA4UXlmU012cWdDWDd2eE5EY3A0M3Fkdkx6c1NTMkxFQ2kK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkwRTc2OEUxNUNDQzIyN0EKUldSNklzeGM0V2pua0Q4TzNtNmViY0JNQ2JoUDE0enFrM1RzS0YrVlV4Z1piUms4K3kzQjZ3UUQK",
       "endpoints": [
         "https://srikanthpullela.github.io/SplecNote-app/updates/latest.json"
       ],
