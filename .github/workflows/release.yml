@@ -1,61 +1,71 @@
-name: Release
+# Automatically builds Splec Note and publishes a release on every push to main.
+#
+# Platforms:
+#   • macOS universal (Apple Silicon + Intel in one DMG)   — macos-latest runner
+#   • Windows x64                                          — windows-latest runner
+#
+# After the builds succeed the publish job:
+#   1. Creates a versioned GitHub Release with all installers + updater artifacts.
+#   2. Generates an update manifest (latest.json) and deploys it to GitHub Pages
+#      so the in-app updater works automatically.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY            — minisign private key (for in-app updater)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD   — key password (leave empty if none)
+#
+# Optional secrets (Apple code signing / notarization):
+#   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+#   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+#
+# One-time GitHub setup required:
+#   Settings → Pages → Build and deployment → Source → "GitHub Actions"
+
+name: Build & Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Version tag (e.g. v0.1.0)"
-        required: true
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
+# ── macOS universal (Apple Silicon + Intel) ─────────────────────────────────────
 jobs:
-  build:
-    name: Build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            artifact_glob: "src-tauri/target/release/bundle/dmg/*.dmg"
-            artifact_name_suffix: "mac"
-          - os: windows-latest
-            artifact_glob: "src-tauri/target/release/bundle/nsis/*.exe"
-            artifact_name_suffix: "windows"
+  build-macos:
+    name: Build · macOS universal
+    runs-on: macos-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
 
-      - name: Install npm dependencies
-        run: npm ci
+      - run: npm ci
 
-      - name: Build Tauri app
-        run: npm run tauri build
+      - name: Bump version
+        run: node .github/scripts/bump-version.js
         env:
+          APP_VERSION: "0.1.${{ github.run_number }}"
+
+      - name: Build (universal)
+        run: npm run tauri build -- --target universal-apple-darwin
+        env:
+          APP_VERSION: "0.1.${{ github.run_number }}"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Apple code signing + notarization (macOS runner only)
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -63,60 +73,163 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          find src-tauri/target/universal-apple-darwin/release/bundle/dmg \
+            -name "*.dmg" -exec cp {} out/SplecNote-mac-universal.dmg \;
+          find src-tauri/target/universal-apple-darwin/release/bundle/macos \
+            -name "*.app.tar.gz" ! -name "*.sig" -exec cp {} out/SplecNote-mac-universal.app.tar.gz \;
+          find src-tauri/target/universal-apple-darwin/release/bundle/macos \
+            -name "*.app.tar.gz.sig" -exec cp {} out/SplecNote-mac-universal.app.tar.gz.sig \; || true
+          ls -lh out/
+
+      - uses: actions/upload-artifact@v4
         with:
-          name: splecnote-${{ matrix.artifact_name_suffix }}
-          path: ${{ matrix.artifact_glob }}
+          name: splecnote-macos
+          path: out/
           if-no-files-found: error
 
-  release:
-    name: Create GitHub Release
-    needs: build
+# ── Windows x64 ─────────────────────────────────────────────────────────────────
+  build-windows:
+    name: Build · Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      - name: Bump version
+        run: node .github/scripts/bump-version.js
+        env:
+          APP_VERSION: "0.1.${{ github.run_number }}"
+
+      - name: Build
+        run: npm run tauri build
+        env:
+          APP_VERSION: "0.1.${{ github.run_number }}"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p out
+          find src-tauri/target/release/bundle/nsis \
+            -name "*-setup.exe" -exec cp {} out/SplecNote-windows-setup.exe \;
+          find src-tauri/target/release/bundle/nsis \
+            -name "*.nsis.zip" ! -name "*.sig" -exec cp {} out/SplecNote-windows.nsis.zip \;
+          find src-tauri/target/release/bundle/nsis \
+            -name "*.nsis.zip.sig" -exec cp {} out/SplecNote-windows.nsis.zip.sig \; || true
+          ls -lh out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: splecnote-windows
+          path: out/
+          if-no-files-found: error
+
+# ── Publish release + update manifest → GitHub Pages ───────────────────────────
+  publish:
+    name: Publish release & deploy update manifest
+    needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.pages-deploy.outputs.page_url }}
 
-      - name: Download macOS artifact
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download macOS artifacts
         uses: actions/download-artifact@v4
         with:
-          name: splecnote-mac
+          name: splecnote-macos
           path: dist/mac
 
-      - name: Download Windows artifact
+      - name: Download Windows artifacts
         uses: actions/download-artifact@v4
         with:
           name: splecnote-windows
           path: dist/windows
 
-      - name: Rename artifacts for clarity
-        run: |
-          (cd dist/mac && for f in *.dmg; do mv "$f" "SplecNote-mac.dmg"; done)
-          (cd dist/windows && for f in *.exe; do mv "$f" "SplecNote-windows-setup.exe"; done)
-
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name || inputs.tag }}
-          name: "Splec Note ${{ github.ref_name || inputs.tag }}"
+          tag_name: "v0.1.${{ github.run_number }}"
+          name: "Splec Note v0.1.${{ github.run_number }}"
           body: |
-            ## Splec Note ${{ github.ref_name || inputs.tag }}
-
-            A lightweight, distinctive cross-platform text & code editor for notes and coding.
+            Automated build from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }}).
 
             ### Downloads
             | Platform | File |
-            |----------|------|
-            | macOS (Universal) | `SplecNote-mac.dmg` |
-            | Windows | `SplecNote-windows-setup.exe` |
+            |---|---|
+            | macOS (Apple Silicon + Intel) | `SplecNote-mac-universal.dmg` |
+            | Windows (x64) | `SplecNote-windows-setup.exe` |
 
-            ### What's new
-            See [README](https://github.com/srikanthpullela/SplecNote-app#readme) for full feature list.
+            ---
+            _Built automatically on every push to `main`._
           draft: false
-          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
+          prerelease: false
           files: |
-            dist/mac/*.dmg
-            dist/windows/*.exe
+            dist/mac/SplecNote-mac-universal.dmg
+            dist/mac/SplecNote-mac-universal.app.tar.gz
+            dist/mac/SplecNote-mac-universal.app.tar.gz.sig
+            dist/windows/SplecNote-windows-setup.exe
+            dist/windows/SplecNote-windows.nsis.zip
+            dist/windows/SplecNote-windows.nsis.zip.sig
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read actual sig file contents
+        id: sigs
+        shell: bash
+        run: |
+          if [ -f dist/mac/SplecNote-mac-universal.app.tar.gz.sig ]; then
+            echo "mac_sig<<SIGEOF" >> $GITHUB_OUTPUT
+            cat dist/mac/SplecNote-mac-universal.app.tar.gz.sig >> $GITHUB_OUTPUT
+            echo "SIGEOF" >> $GITHUB_OUTPUT
+          fi
+          if [ -f dist/windows/SplecNote-windows.nsis.zip.sig ]; then
+            echo "win_sig<<SIGEOF" >> $GITHUB_OUTPUT
+            cat dist/windows/SplecNote-windows.nsis.zip.sig >> $GITHUB_OUTPUT
+            echo "SIGEOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate update manifest & download page
+        run: node .github/scripts/gen-pages.js
+        env:
+          APP_VERSION: "0.1.${{ github.run_number }}"
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PUB_DATE: ${{ github.event.head_commit.timestamp }}
+          MAC_SIG: ${{ steps.sigs.outputs.mac_sig }}
+          WIN_SIG: ${{ steps.sigs.outputs.win_sig }}
+          PAGES_DIR: pages
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages/
+
+      - name: Deploy to GitHub Pages
+        id: pages-deploy
+        uses: actions/deploy-pages@v4

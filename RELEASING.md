@@ -1,168 +1,152 @@
 # Releasing Splec Note
 
-This document describes how to build, sign, notarize and ship a Splec Note
-release, plus how the auto-updater flow works. None of these secrets are stored
-in the repo — they are provided at build time via environment variables.
+Releases are **fully automated** — every push to `main` triggers
+`.github/workflows/release.yml`, which builds, versions, publishes a GitHub
+Release, and deploys the in-app updater manifest to GitHub Pages.
+No manual tagging or local builds are required.
 
-> **What can be built without credentials:** the frontend (`npm run build`), the
-> Rust binary, and the macOS **`.app`** bundle all build with a plain
-> Command-Line-Tools toolchain. The **`.dmg`** additionally needs an interactive
-> GUI (WindowServer) session — its Finder-window layout step uses AppleScript and
-> fails with `AppleEvent timed out (-1712)` on a headless box. **Signing and
-> notarization require an Apple Developer account.** CI (GitHub-hosted macOS
-> runners, which have a GUI session) produces the `.dmg`.
+---
 
-## 1. Versioning
+## How it works
 
-Bump the version in **both** places so the bundle and updater agree:
-
-- `package.json` → `version`
-- `src-tauri/tauri.conf.json` → `version` (and `src-tauri/Cargo.toml` if pinned)
-
-Tag the release: `git tag v0.1.0 && git push --tags`.
-
-## 2. Build the installers
-
-```bash
-npm ci
-npm run tauri build           # → src-tauri/target/release/bundle/{macos,dmg}
+```
+push to main
+    │
+    ├─► build-macos  (macos-latest)
+    │     • Bumps version to 0.1.<run_number>
+    │     • Builds universal DMG (Apple Silicon + Intel)
+    │     • Uploads: SplecNote-mac-universal.dmg
+    │                SplecNote-mac-universal.app.tar.gz
+    │                SplecNote-mac-universal.app.tar.gz.sig  (if key set)
+    │
+    ├─► build-windows  (windows-latest)
+    │     • Bumps version to 0.1.<run_number>
+    │     • Builds NSIS installer (x64)
+    │     • Uploads: SplecNote-windows-setup.exe
+    │                SplecNote-windows.nsis.zip
+    │                SplecNote-windows.nsis.zip.sig  (if key set)
+    │
+    └─► publish  (ubuntu-latest)
+          • Creates GitHub Release  →  v0.1.<run_number>
+          • Generates pages/updates/latest.json  (Tauri updater manifest)
+          • Generates pages/index.html  (download landing page)
+          • Deploys both to GitHub Pages
 ```
 
-Artifacts:
+**Versioning** is automatic: `0.1.<github_run_number>`.  No manual bumps needed.
 
-- `bundle/macos/Splec Note.app` — the application bundle.
-- `bundle/dmg/Splec Note_<version>_<arch>.dmg` — the disk image (GUI session
-  required, see note above).
-- On Windows: `bundle/nsis/Splec Note_<version>_x64-setup.exe`.
+---
 
-For a universal macOS binary:
+## One-time GitHub setup
 
-```bash
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-npm run tauri build -- --target universal-apple-darwin
-```
+### 1. Enable GitHub Pages
 
-## 3. Code signing (macOS)
+Go to **Settings → Pages → Build and deployment → Source** and select
+**GitHub Actions**.  This is required once; after that every push deploys
+automatically.
 
-Signing needs a **Developer ID Application** certificate in your login keychain.
-Set these before `npm run tauri build`:
+### 2. Add the updater signing key (for in-app updates)
 
-```bash
-export APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
-# Optional: point Tauri at a specific keychain
-export APPLE_CERTIFICATE="<base64 of the .p12>"          # for CI import
-export APPLE_CERTIFICATE_PASSWORD="<p12 password>"
-```
-
-Tauri signs the `.app`/`.dmg` automatically when `APPLE_SIGNING_IDENTITY` is set.
-
-## 4. Notarization (macOS)
-
-After signing, notarize with an app-specific password or an App Store Connect API
-key. Tauri can run this for you when these are set:
-
-```bash
-export APPLE_ID="you@example.com"
-export APPLE_PASSWORD="<app-specific-password>"          # appleid.apple.com
-export APPLE_TEAM_ID="TEAMID"
-# — or — API key auth:
-export APPLE_API_ISSUER="<issuer-uuid>"
-export APPLE_API_KEY="<key-id>"
-export APPLE_API_KEY_PATH="/path/to/AuthKey_<keyid>.p8"
-```
-
-Manual equivalent (if not letting Tauri drive it):
-
-```bash
-xcrun notarytool submit "Splec Note_<version>_<arch>.dmg" \
-  --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" \
-  --wait
-xcrun stapler staple "Splec Note_<version>_<arch>.dmg"
-```
-
-## 5. Windows signing (optional)
-
-```bash
-export WINDOWS_CERTIFICATE="<base64 of the .pfx>"
-export WINDOWS_CERTIFICATE_PASSWORD="<pfx password>"
-```
-
-The NSIS installer and `.ico` are already configured in `tauri.conf.json`.
-
-## 6. Auto-update flow
-
-Splec Note bundles **`tauri-plugin-updater`**. On launch (production builds only)
-and from **Splec Note ▸ Check for Updates…**, the app asks the configured
-endpoint whether a newer signed release exists, then downloads, verifies the
-signature and relaunches.
-
-### Updater signing key
-
-Updates are verified with a **minisign** key pair (separate from the Apple
-identity). The **public** key is committed in
-`src-tauri/tauri.conf.json` → `plugins.updater.pubkey`. The **private** key is a
-release secret — never commit it.
-
-> The pubkey currently in the repo is a **throwaway placeholder**. Generate a
-> real pair before shipping and replace it:
+Generate a minisign key pair:
 
 ```bash
 npm run tauri signer generate -- -w ~/.splec/updater.key
-# Put the printed PUBLIC key into tauri.conf.json → plugins.updater.pubkey
 ```
 
-Sign updates at build time by exporting the private key:
+This prints the **public key**.  Add it to `src-tauri/tauri.conf.json` →
+`plugins.updater.pubkey`.
 
-```bash
-export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.splec/updater.key)"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="<key password, if any>"
-npm run tauri build
+Then add two **repository secrets** (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+|--------|-------|
+| `TAURI_SIGNING_PRIVATE_KEY` | `$(cat ~/.splec/updater.key)` |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | your key password (or leave empty) |
+
+> Without the signing key the build still succeeds and installs work, but the
+> in-app "Check for Updates" feature won't function.
+
+> The `pubkey` currently in the repo is a **throwaway placeholder**.  Replace it
+> with your real public key before shipping.
+
+### 3. Apple code signing (optional)
+
+Set these repository secrets if you have an Apple Developer account:
+
+| Secret | Value |
+|--------|-------|
+| `APPLE_CERTIFICATE` | base64-encoded `.p12` certificate |
+| `APPLE_CERTIFICATE_PASSWORD` | `.p12` password |
+| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: Your Name (TEAMID)` |
+| `APPLE_ID` | your Apple ID |
+| `APPLE_PASSWORD` | app-specific password from appleid.apple.com |
+| `APPLE_TEAM_ID` | 10-character team ID |
+
+Without these, the DMG is unsigned (Gatekeeper will warn on first open).
+
+---
+
+## Download URLs for splecdevelopers.com
+
+Point your website download buttons at these permanent "latest release" URLs:
+
+| Platform | URL |
+|----------|-----|
+| macOS (Universal) | `https://github.com/srikanthpullela/SplecNote-app/releases/latest/download/SplecNote-mac-universal.dmg` |
+| Windows (x64) | `https://github.com/srikanthpullela/SplecNote-app/releases/latest/download/SplecNote-windows-setup.exe` |
+
+These always redirect to the latest release automatically.
+
+---
+
+## In-app updater endpoint
+
+`plugins.updater.endpoints` in `tauri.conf.json` now points at:
+
+```
+https://srikanthpullela.github.io/SplecNote-app/updates/latest.json
 ```
 
-This emits a `.sig` next to each updater artifact.
-
-### Update endpoint
-
-`plugins.updater.endpoints` points at:
-
-```
-https://splecdevelopers.com/splec-note/updates/{{target}}/{{arch}}/{{current_version}}
-```
-
-The server must return **404** when up to date, or JSON like:
+The manifest at that URL is regenerated and deployed on every push to `main` by
+`.github/scripts/gen-pages.js`.  The format is:
 
 ```json
 {
-  "version": "0.1.1",
-  "notes": "Bug fixes",
-  "pub_date": "2024-01-01T00:00:00Z",
+  "version": "0.1.42",
+  "notes": "Automated build v0.1.42",
+  "pub_date": "2026-01-01T00:00:00Z",
   "platforms": {
-    "darwin-aarch64": {
-      "signature": "<contents of the .sig file>",
-      "url": "https://splecdevelopers.com/splec-note/dl/Splec-Note_0.1.1_aarch64.app.tar.gz"
-    }
+    "darwin-aarch64": { "signature": "…", "url": "https://…/SplecNote-mac-universal.app.tar.gz" },
+    "darwin-x86_64":  { "signature": "…", "url": "https://…/SplecNote-mac-universal.app.tar.gz" },
+    "windows-x86_64": { "signature": "…", "url": "https://…/SplecNote-windows.nsis.zip" }
   }
 }
 ```
 
-Update the endpoint host if you serve releases elsewhere (e.g. GitHub Releases).
+---
 
-## 7. CI
+## CI (non-release)
 
-`.github/workflows/ci.yml` runs on every PR and on `main`:
+`.github/workflows/ci.yml` runs on every PR and on `main` pushes alongside the
+release workflow.  It compiles and tests the code but does **not** create
+releases or upload artifacts.  Signing/notarization secrets are not referenced.
 
-- `npm ci`, `npm run build`, `cargo test --locked`
-- `npm run tauri build -- --no-bundle` on **macOS** and **Windows**
+---
 
-Signing/notarization secrets are **not** referenced in CI; wire them into a
-separate, tag-triggered release workflow using repository secrets when you are
-ready to publish.
+## Manual build (local)
 
-## 8. Release checklist
+```bash
+npm ci
 
-- [ ] Bump version in `package.json` + `tauri.conf.json`.
-- [ ] Replace the placeholder updater pubkey with your real public key.
-- [ ] `npm run tauri build` with signing + notarization env vars set.
-- [ ] Verify the `.dmg` opens, the app launches, and Gatekeeper accepts it.
-- [ ] Upload artifacts + `.sig` files and publish the updater JSON.
-- [ ] Tag and push: `git tag vX.Y.Z && git push --tags`.
+# macOS universal
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+npm run tauri build -- --target universal-apple-darwin
+
+# Windows (from Windows machine)
+npm run tauri build
+```
+
+> Building the `.dmg` requires a GUI session (WindowServer).  GitHub-hosted
+> macOS runners have one; headless boxes do not (DMG layout fails with
+> `AppleEvent timed out -1712`).
+
