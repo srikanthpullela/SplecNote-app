@@ -247,10 +247,22 @@ export class SplecApp {
     const cleanWindow = new URLSearchParams(location.search).get("new") === "1";
     let restored = false;
     if (!cleanWindow && this.prefs.restoreSession) {
-      restored = await this.session.restore();
+      try {
+        restored = await this.session.restore();
+      } catch {
+        restored = false;
+      }
     }
     if (!restored && this.store.count() === 0) {
       this.newBuffer();
+    } else if (!restored && this.store.count() > 0) {
+      // Buffers were added during a partial restore but activation failed;
+      // force-show whichever buffer the store picked as active.
+      try {
+        await this.showActive();
+      } catch {
+        this.refreshAll();
+      }
     }
 
     this.session.startAutosaveLifecycle();
@@ -1898,5 +1910,13 @@ export class SplecApp {
 
 const app = new SplecApp();
 window.addEventListener("DOMContentLoaded", () => {
-  void app.init();
+  app.init().catch(() => {
+    // Last-resort fallback: init threw before creating any visible buffer.
+    // Try to open a fresh untitled tab so the window is never blank.
+    if (app.host && app.store.count() === 0) {
+      try { app.newBuffer(); } catch { /* nothing more to do */ }
+    } else if (app.host && app.store.count() > 0) {
+      try { void app.showActive(); } catch { app.refreshAll(); }
+    }
+  });
 });

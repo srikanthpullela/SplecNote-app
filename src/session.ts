@@ -142,17 +142,19 @@ export class SessionManager {
 
   async restore(): Promise<boolean> {
     if (!isTauri()) return false;
-    let restored: { manifest: SessionManifest; contents: Record<string, string> } | null;
+    let sessionData: { manifest: SessionManifest; contents: Record<string, string> } | null;
     try {
-      restored = await loadSession();
+      sessionData = await loadSession();
     } catch {
       return false;
     }
-    if (!restored || !restored.manifest || restored.manifest.tabs.length === 0) {
+    if (!sessionData || !sessionData.manifest || sessionData.manifest.tabs.length === 0) {
       return false;
     }
 
-    const { manifest, contents } = restored;
+    const { manifest, contents } = sessionData;
+
+    // Add all buffers to the store first (these are purely synchronous/safe).
     for (const tab of manifest.tabs) {
       const content = contents[tab.id] ?? "";
       const buf = this.app.makeBuffer({
@@ -174,16 +176,33 @@ export class SessionManager {
       this.app.store.add(buf);
     }
 
-    const activeId =
-      manifest.activeId && this.app.store.get(manifest.activeId)
-        ? manifest.activeId
-        : this.app.store.list()[0]?.id ?? null;
-    if (activeId) await this.app.activate(activeId);
-    else this.app.refreshAll();
+    // Activate the previously active tab. Guard with try/catch: a transient
+    // failure here (e.g. WKWebView disk-cache corruption after a hard shutdown
+    // making a dynamic language import fail) must not leave the window blank.
+    try {
+      const activeId =
+        manifest.activeId && this.app.store.get(manifest.activeId)
+          ? manifest.activeId
+          : this.app.store.list()[0]?.id ?? null;
+      if (activeId) await this.app.activate(activeId);
+      else this.app.refreshAll();
+    } catch {
+      // Activation failed; attempt to show whatever buffer the store selected,
+      // falling back to a plain refresh so tabs are at least visible.
+      try {
+        await this.app.showActive();
+      } catch {
+        this.app.refreshAll();
+      }
+    }
 
     // Restore split layout after the active tab is shown.
-    if (manifest.split?.enabled) {
-      this.app.split.enable(manifest.split.orientation === "horizontal" ? "horizontal" : "vertical");
+    try {
+      if (manifest.split?.enabled) {
+        this.app.split.enable(manifest.split.orientation === "horizontal" ? "horizontal" : "vertical");
+      }
+    } catch {
+      /* non-fatal — split state is cosmetic */
     }
 
     this.app.setMessage(`Restored ${manifest.tabs.length} tab${manifest.tabs.length === 1 ? "" : "s"}`);
