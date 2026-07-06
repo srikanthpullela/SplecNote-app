@@ -368,15 +368,25 @@ const loadCache = new Map<string, Extension>();
 
 export async function loadLanguageExtension(id: string): Promise<Extension> {
   if (id.startsWith("udl:")) {
-    const ext = await udlResolver?.load(id);
-    return ext ?? [];
+    try {
+      const ext = await udlResolver?.load(id);
+      return ext ?? [];
+    } catch {
+      return [];
+    }
   }
   const def = LANGUAGES[id] ?? LANGUAGES.plaintext;
   const cached = loadCache.get(def.id);
   if (cached) return cached;
-  const ext = await def.load();
-  loadCache.set(def.id, ext);
-  return ext;
+  try {
+    const ext = await def.load();
+    loadCache.set(def.id, ext);
+    return ext;
+  } catch {
+    // Dynamic import can fail (e.g. after a hard shutdown corrupts the WKWebView
+    // disk cache). Fall back to no syntax highlighting so the editor still opens.
+    return [];
+  }
 }
 
 // User-Defined Language resolver hook (registered by the UDL module at startup),
