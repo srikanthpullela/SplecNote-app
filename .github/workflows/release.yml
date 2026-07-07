@@ -50,11 +50,42 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      # ── Windows code signing ────────────────────────────────────────────────
+      # Imports a PFX certificate (stored as a base64 secret) into the Windows
+      # certificate store, then exposes its thumbprint so Tauri can call
+      # signtool during the bundle step.  Skipped silently when the secret is
+      # absent (e.g. unsigned dev/preview builds).
+      - name: Import Windows code-signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CERT_B64: ${{ secrets.WINDOWS_CERTIFICATE }}
+          CERT_PWD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:CERT_B64) {
+            Write-Host "WINDOWS_CERTIFICATE secret not set — building without signing."
+            exit 0
+          }
+          $pfxBytes = [System.Convert]::FromBase64String($env:CERT_B64)
+          $pfxPath  = "$env:RUNNER_TEMP\splecnote-sign.pfx"
+          [System.IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+          $securePwd = ConvertTo-SecureString $env:CERT_PWD -Force -AsPlainText
+          $cert = Import-PfxCertificate `
+                    -FilePath $pfxPath `
+                    -CertStoreLocation Cert:\CurrentUser\My `
+                    -Password $securePwd
+          "TAURI_WINDOWS_CERTIFICATE_THUMBPRINT=$($cert.Thumbprint)" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Remove-Item $pfxPath -Force
+          Write-Host "Certificate imported. Thumbprint=$($cert.Thumbprint)"
+
       - name: Build Tauri app
         run: npm run tauri build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Windows code signing (thumbprint set by the import step above)
+          TAURI_WINDOWS_CERTIFICATE_THUMBPRINT: ${{ env.TAURI_WINDOWS_CERTIFICATE_THUMBPRINT }}
           # Apple code signing + notarization (macOS runner only)
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}

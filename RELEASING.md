@@ -80,14 +80,80 @@ xcrun notarytool submit "Splec Note_<version>_<arch>.dmg" \
 xcrun stapler staple "Splec Note_<version>_<arch>.dmg"
 ```
 
-## 5. Windows signing (optional)
+## 5. Windows code signing
 
-```bash
-export WINDOWS_CERTIFICATE="<base64 of the .pfx>"
-export WINDOWS_CERTIFICATE_PASSWORD="<pfx password>"
+Without a code-signing certificate the NSIS installer triggers **Windows
+Defender SmartScreen** ("Windows protected your PC") and enterprise IT policies
+often block the download entirely.  Signing with a trusted certificate removes
+both problems.
+
+### Option A — Traditional OV/EV certificate (recommended for companies)
+
+1. **Purchase a certificate** from DigiCert, Sectigo, or GlobalSign.
+   - *OV (Organization Validated)* — $100–200/yr; SmartScreen reputation
+     builds over a few installs.
+   - *EV (Extended Validation)* — $300–500/yr; **immediately trusted** by
+     SmartScreen; required if you want instant zero-warning downloads.
+2. **Export as `.pfx`** (with a strong password).
+3. **Base64-encode** it:
+   ```bash
+   # macOS / Linux
+   base64 -i splecnote-sign.pfx | tr -d '\n' > cert_b64.txt
+
+   # PowerShell (Windows)
+   [Convert]::ToBase64String([IO.File]::ReadAllBytes("splecnote-sign.pfx")) | Set-Content cert_b64.txt
+   ```
+4. **Add two repository secrets** (Settings → Secrets and variables → Actions):
+   | Secret name | Value |
+   |---|---|
+   | `WINDOWS_CERTIFICATE` | contents of `cert_b64.txt` |
+   | `WINDOWS_CERTIFICATE_PASSWORD` | the PFX password |
+
+The release workflow (`release.yml`) will automatically import the certificate,
+extract its thumbprint, and pass it to Tauri via
+`TAURI_WINDOWS_CERTIFICATE_THUMBPRINT` so the NSIS installer is signed at
+bundle time.  Builds without the secrets set are still produced (unsigned) so
+CI is not broken.
+
+### Option B — Microsoft Azure Trusted Signing (~$10/month)
+
+A cheaper, cloud-hosted option that also satisfies SmartScreen:
+
+1. Create an Azure Trusted Signing account and resource.
+2. Add the GitHub Action `azure/trusted-signing-action@v0` **after** the
+   `Build Tauri app` step and point it at the built `.exe`:
+   ```yaml
+   - uses: azure/trusted-signing-action@v0
+     with:
+       azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+       azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+       azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+       endpoint: https://<your-region>.codesigning.azure.net/
+       trusted-signing-account-name: <account>
+       certificate-profile-name: <profile>
+       files-folder: src-tauri/target/release/bundle/nsis
+       files-folder-filter: exe
+   ```
+3. Skip the `Import Windows code-signing certificate` step by leaving the
+   `WINDOWS_CERTIFICATE` secret unset.
+
+### Option C — Interim end-user workaround
+
+If you release before obtaining a certificate, include this note in the
+release body:
+
+> **Windows note:** Until our code-signing certificate is active, Windows
+> Defender SmartScreen may show a warning.  Click **More info → Run anyway**
+> to install.  Once the certificate has accumulated enough reputation, this
+> warning will disappear automatically.
+
+### Verifying the signature locally
+
+```powershell
+Get-AuthenticodeSignature "SplecNote-windows-setup.exe" | Select Status, SignerCertificate
 ```
 
-The NSIS installer and `.ico` are already configured in `tauri.conf.json`.
+The `Status` field must be `Valid` for SmartScreen to accept it silently.
 
 ## 6. Auto-update flow
 
