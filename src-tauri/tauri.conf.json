@@ -56,6 +56,8 @@
       }
     ],
     "windows": {
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com",
       "nsis": {
         "installerIcon": "icons/icon.ico",
         "installMode": "currentUser"
